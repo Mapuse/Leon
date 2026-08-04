@@ -1,0 +1,240 @@
+.\" Leon Build Tool — Man Page
+.TH LBT 1 "2026-08-02" "lbt 0.7.0" "User Commands"
+.SH NAME
+lbt \- Leon Build Tool: author and preview boot themes, run plugins, manage boot config
+.SH SYNOPSIS
+.B lbt
+.B info
+.RI [ dump ]
+.br
+.B lbt
+.B discover
+.RI [ \-\-json ]
+.br
+.B lbt
+.B theme
+.B list | preview
+.I name
+.RI [ dump ]
+.B | run
+.I name
+.RI [ dump ]
+.br
+.B lbt
+.B plugin
+.B list | run
+.I name
+.I func
+.RI [ args ... ]
+.br
+.B lbt
+.B tui
+.RI [ run
+.RI [ name ]
+.B | apply
+.I name
+.B | list ]
+.br
+.B lbt
+.B config
+.B get
+.RI [ key ]
+.B | set
+.I key
+.I value
+.SH DESCRIPTION
+.B lbt
+is the host-side companion to the Leon bootloader. It introspects the live
+machine (block devices, EFI System Partitions, boot entries, framebuffer and
+BGRT logo geometry), renders boot themes against real or dumped geometry, runs
+Leon plugins, launches full-screen TUIs (a keyboard-driven boot-manager menu
+ships as the default), and edits the boot configuration consumed by the
+bootloader.
+.br
+Theme and plugin registration is delegated to the shared cps engine
+(see
+.BR cps (1)),
+so whatever is registered there (t.desc / p.desc) is available to
+.BR lbt .
+The theme, plugin, and tui commands require the
+.I python
+build feature (what
+.B "make build"
+produces); a plain
+.B "cargo build -p lbt"
+links no Python code and omits them.
+.SH COMMANDS
+.SS info
+Print the current framebuffer and BGRT logo geometry.
+.TP
+.B info \fIdump\
+With a path to a geometry record (\fIbootinfo.json\fR written by the
+bootloader to \eEFI\eleon), print the captured geometry instead of the live one.
+.TP
+.B info
+Without an argument, read live geometry from /sys
+(/sys/class/graphics/fb0 and /sys/firmware/acpi/bgrt). Fails loudly if no live
+framebuffer is available rather than guessing.
+.SS discover
+Auto-detect every EFI System Partition and its boot entries.
+Note: In addition to enumerating mounted ESPs, Leon scans common `/boot`
+locations (`/boot`, `/boot/efi`, `/boot/EFI`) for EFI-capable files and
+includes them as candidate boot entries. Detection is strict: `.efi` files
+must validate as PE/COFF (`MZ` + `PE\0\0`) and ELF files must contain the
+`EFI stub` marker in the first 64 KiB to be accepted as an EFI-stub kernel.
+.TP
+.B discover
+List block devices (name, kind, filesystem, mount point), ESPs, and boot entries.
+.TP
+.B discover \-\-json
+Emit the same information as machine-readable JSON with the keys
+.BR devices ,
+.BR esps ,
+and
+.BR boot_entries .
+.SS theme
+.TP
+.B theme list
+List registered boot themes.
+.TP
+.B theme preview \fIname\fR \fI[dump]\fR
+Render a theme's splash and menu against Leon geometry (live sysfs, or a
+geometry record), without touching the display.
+.TP
+.B theme run \fIname\fR \fI[dump]\fR
+Invoke a theme's full-screen
+.IR run ()
+program.
+.SS plugin
+.TP
+.B plugin list
+List registered plugins.
+.TP
+.B plugin run \fIname\fR \fIfunc\fR \fI[args ...]\fR
+Run a plugin function (by name or alias) with the given arguments.
+.SS tui
+.TP
+.B tui
+.RI [ run
+.RI [ name ]
+.B | apply
+.I name
+.B | list ]
+.TP
+.B tui
+or
+.B "tui run"
+Run the configured default TUI (the
+.I [python] tui
+path in
+.I ~/.config/leon/python.toml
+). When none is configured, the shipped Leon boot-manager menu runs — it is
+embedded in the binary and materialized to
+.I ~/.config/leon/tuis/leon_menu.py
+on first use.
+.TP
+.B "tui run" \fIname\fR
+Run the registered TUI \fIname\fR (from
+.I t.desc
+) instead.
+.TP
+.B "tui list"
+List registered TUIs.
+.TP
+.B "tui apply" \fIname\fR
+Persist a TUI as the default in
+.I ~/.config/leon/python.toml
+(absolute path, \fItui_mode\fR pinned to \fBfalse\fR) and print the stored
+path.
+.PP
+Before a TUI runs, lbt exports the live framebuffer + BGRT geometry, the
+discovered boot entries, and the boot config as
+.I LEON_*
+environment variables (see the header of
+.I ~/.config/leon/tuis/leon_menu.py
+). The menu is pure stdlib (no curses) and uses the full keymap: arrows and
+.I hjkl
+to move, PgUp/PgDn, Home/End, \fI1-9\fR/\fI0\fR to jump,
+.I /
+to search with
+.I n
+/
+.I N
+for next/previous match, Tab/Shift+Tab to move focus, Enter or space for a
+boot preview, and
+.I q
+/ Esc / Ctrl+C to quit. Geometry or entries may be absent (no framebuffer, no
+mounted ESP) — the menu shows a friendly placeholder state.
+.SS config
+.TP
+.B config get \fI[key]\fR
+Print one boot config key, or all keys when omitted.
+.TP
+.B config set \fIkey\fR \fIvalue\fR
+Set a boot config key. Supported keys:
+.IR timeout ,
+.IR default_entry ,
+.IR theme ,
+.IR splash ,
+.IR entries_file
+(the former must be
+.B true
+or
+.BR false ).
+The new value is written to
+.I ~/.config/leon/boot.toml
+and mirrored onto every mounted EFI System Partition as
+.IR \eEFI\eleon\eboot.toml ,
+which is what the bootloader reads at boot.
+.SH FILES
+.TP
+.I ~/.config/leon/boot.toml
+Host copy of the boot configuration (timeout, default_entry, theme, splash,
+entries_file) written by
+.BR "lbt config set" .
+If absent,
+.B config get
+falls back to the copy on a mounted ESP.
+.TP
+.I \eEFI\eleon\eboot.toml
+The copy the bootloader actually reads, kept on the boot volume (ESP) and
+validated by it at every boot; a missing or broken file simply yields
+defaults.
+.TP
+.I \eEFI\eleon\ebootinfo.json
+Geometry + resolved config record written by the bootloader at boot time;
+consumed by
+.B lbt info
+and
+.BR lbt " theme preview/run" .
+.TP
+.I \eEFI\eleon\eentries.jsonc
+Boot entries discovered and written by the bootloader at every boot; consumed
+by
+.BR lbt " discover" .
+.TP
+.I ~/.config/leon/python.toml
+Host Python config for the cps engine (\fIenabled\fR, \fItui\fR, \fItheme\fR,
+\fIvenv_path\fR, \fItui_mode\fR). Relative \fItui\fR/\fIvenv_path\fR paths
+resolve against this file's directory, never the working directory.
+.TP
+.I ~/.config/leon/tuis/leon_menu.py
+The shipped boot-manager TUI, materialized from the embedded copy on first
+use; edit it to customize the default menu.
+.TP
+.I t.desc , p.desc
+Descriptor files registering themes, TUIs and plugins for the shared cps
+engine. The first parseable file in
+.IR ~/.config/leon ,
+.IR /etc/leon ,
+and the current directory wins; the repo ships a default
+.I t.desc
+registering the Leon menu.
+.SH SEE ALSO
+.BR lbl (1),
+.BR leon-common (7),
+.BR cps (1)
+.SH AUTHOR
+Mapuse
+.SH LICENSE
+MIT

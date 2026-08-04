@@ -1,0 +1,40 @@
+# Leon — build.ninja (auto-detects amd64/arm64)
+# Usage: ninja                    # build + stage ESP tree under builddir/
+#        ninja builddir/install   # copy the staged tree to builddir/install
+#   (edit DESTDIR/PREFIX below to target another root; ninja has no -D override)
+
+rule cargo
+  command = sh -c 'case $$(uname -m) in x86_64) T=x86_64-unknown-uefi;; aarch64) T=aarch64-unknown-uefi;; *) echo "unsupported: $$(uname -m)"; exit 1;; esac; CARGO_TARGET_DIR=$$(pwd)/builddir/cargo cargo build --locked --target $$T --release --manifest-path $$(pwd)/Cargo.toml && cp $$(pwd)/builddir/cargo/$$T/release/lbl.efi $out'
+  description = cargo build lbl bootloader
+
+rule cargo-kernel
+  command = sh -c 'case $$(uname -m) in x86_64) T=x86_64-unknown-uefi;; aarch64) T=aarch64-unknown-uefi;; *) echo "unsupported: $$(uname -m)"; exit 1;; esac; CARGO_TARGET_DIR=$$(pwd)/builddir/kernel-cargo cargo build --locked --target $$T --release --manifest-path $$(pwd)/kernel/Cargo.toml && cp $$(pwd)/builddir/kernel-cargo/$$T/release/lbl-kernel.efi $out'
+  description = cargo build lbl-kernel
+
+rule stage
+  command = sh -c 'case $$(uname -m) in x86_64) B=BOOTX64.EFI;; aarch64) B=BOOTAA64.EFI;; *) echo "unsupported: $$(uname -m)"; exit 1;; esac; mkdir -p $$(dirname $out)/EFI/BOOT $$(dirname $out)/EFI/leon; install -m 644 $lbl $$(dirname $out)/EFI/BOOT/$$B; install -m 644 $ke $$(dirname $out)/EFI/leon/kernel.efi; touch $out'
+  description = stage ESP tree at $out
+
+rule install
+  command = sh -c 'mkdir -p $out; cp -a $in/EFI/. $out/'
+  description = install ESP tree to $out
+
+srcdir = .
+builddir = builddir
+DESTDIR = builddir/install
+PREFIX =
+
+bl = $builddir/lbl.efi
+ke = $builddir/lbl-kernel.efi
+
+build $bl: cargo
+build $ke: cargo-kernel
+
+staged = $builddir/esp
+build $staged: stage $bl $ke
+  lbl = $bl
+  ke = $ke
+
+build ${DESTDIR}${PREFIX}: install $staged
+
+default $staged

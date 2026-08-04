@@ -1,0 +1,84 @@
+.\" Leon Bootloader — Man Page
+.TH LBL 1 "2026-08-02" "lbl 0.7.0" "User Commands"
+.SH NAME
+lbl \- the Leon chainloading bootloader for Cudane
+.SH SYNOPSIS
+.B lbl
+.br
+(EFI application \fIlbl.efi\fR; booted directly by the UEFI firmware)
+.SH DESCRIPTION
+.B lbl
+is the UEFI bootloader for the Leon project. It runs in the firmware
+environment, captures the GOP framebuffer without ever calling \fBset_mode\fR,
+parses the ACPI BGRT logo table, discovers the boot entries on the EFI System
+Partition, and chainloads the chosen image with
+.BR LoadImage " / " StartImage .
+It has no command-line interface: it is launched by the firmware from an EFI
+System Partition and runs during boot. Any terminal invocation simply reports
+that it is not an EFI environment.
+.SH BOOT SEQUENCE
+.TP
+1
+Resolve the system tables and verify a UEFI environment.
+.TP
+2
+Capture the Graphics Output Protocol framebuffer (current mode only; no
+.B set_mode
+so the graphics hardware is never re-initialized) and record its geometry
+(resolution, stride, pixel format).
+.TP
+3
+Walk the ACPI tables, parse the BGRT, and capture the logo rectangle, status,
+and image type.
+.TP
+4
+Read and validate the boot configuration \eEFI\eleon\eboot.toml (written by
+.BR "lbt config set" );
+a missing or broken file yields defaults, never a blocked boot.
+.TP
+5
+Discover every \eEFI\e\e*.efi boot entry and write them as JSONC to
+\eEFI\eleon\eentries.jsonc.
+.TP
+6
+Record the live geometry + resolved config to \eEFI\eleon\ebootinfo.json for
+host-side tooling.
+.TP
+7
+With \fBsplash = true\fR, show a menu; otherwise boot the configured
+\fBdefault_entry\fR, falling back to the first discovered entry.
+.TP
+8
+Chainload the chosen image via
+.BR LoadImage " / " StartImage
+with
+.BR BootPolicy::BootSelection ,
+without touching the screen. The kernel (an EFI stub) then does its own GOP +
+BGRT acquisition, calls \fBexit_boot_services()\fR itself, and halts.
+.SH FILES
+.TP
+.I \eEFI\eleon\eleon.efi
+The bootloader application (also staged as \eEFI\eBOOT\ebootx64\e.efi).
+.TP
+.I \eEFI\eleon\ekernel.efi
+The EFI-stub kernel, discovered as a regular boot entry.
+.TP
+.I \eEFI\eleon\eboot.toml
+Boot configuration, read and validated at every boot.
+.TP
+.I \eEFI\eleon\eentries.jsonc
+Discovered boot entries, rewritten every boot.
+.TP
+.I \eEFI\eleon\ebootinfo.json
+Geometry + resolved config record written each boot for
+.BR lbt (1).
+.TP
+.I \evar\elogs\eleon\elog.md
+Unified boot log (Markdown, capped at 64 KiB).
+.SH SEE ALSO
+.BR lbt (1),
+.BR leon-common (7)
+.SH AUTHOR
+Mapuse
+.SH LICENSE
+MIT

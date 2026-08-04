@@ -1,0 +1,12 @@
+# Build settings for the lbl bootloader.
+#
+# No `[build] target`: the Makefile/ninja/meson front-ends pass `--target`
+# explicitly so a single host can produce both amd64 and arm64 EFI binaries.
+# The default rust-lld (bundled with rustup) links the UEFI targets; no
+# external clang/lld is required.
+
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.aarch64-unknown-uefi]
+rustflags = ["-C", "target-cpu=generic"]

@@ -1,0 +1,14 @@
+[package]
+name = "leon-common"
+version = "0.7.0"
+edition = "2024"
+description = "Shared firmware-geometry types and boot config parser between the leon bootloader, its EFI-stub kernel, and lbt"
+
+[features]
+default = ["boot-config"]
+# `boot-config` pulls in `alloc` (the config stores strings). The EFI-stub
+# kernel only needs the geometry types, so it disables default features; the
+# bootloader and host tooling keep them on.
+boot-config = []
+
+[dependencies]

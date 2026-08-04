@@ -1,0 +1,5 @@
+/target
+/kernel/target
+/build
+/builddir
+/lbt/tuis/__pycache__

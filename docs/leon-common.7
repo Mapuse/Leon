@@ -1,0 +1,141 @@
+.\" Leon Common Types — Man Page
+.TH LEON-COMMON 7 "2026-08-02" "leon-common 0.7.0" "Miscellaneous"
+.SH NAME
+leon-common \- shared firmware-geometry types and boot config parser for Leon
+.SH DESCRIPTION
+.B leon-common
+documents the types shared between the Leon bootloader
+.BR lbl ,
+its EFI-stub kernel
+.BR lbl-kernel ,
+and the host build tool
+.BR lbt :
+the GOP frame buffer description, the ACPI BGRT logo metadata, and the boot
+configuration file the bootloader validates at every boot.
+There is no handoff blob: the kernel is a plain UEFI application that acquires
+the GOP framebuffer and the BGRT itself after being chainloaded, so these types
+are shared purely as a common representation. Every type is
+.B repr(C)
+and the crate is
+.B #![no_std]
+with zero dependencies.
+.SH FRAMEBUFFER
+.TP
+.B base
+Physical address of the frame buffer.
+.TP
+.B size
+Frame buffer size in bytes.
+.TP
+.B width
+Horizontal resolution in pixels.
+.TP
+.B height
+Vertical resolution in pixels.
+.TP
+.B stride
+Pixels per scan line (>= width).
+.TP
+.B format
+One of:
+.RS
+.TP
+.B Rgbx (0)
+32-bit, red-green-blue-ignored.
+.TP
+.B Bgrx (1)
+32-bit, blue-green-red-ignored (most common on UEFI).
+.TP
+.B Bitmask (2)
+Custom format; color masks describe the layout.
+.TP
+.B BltOnly (3)
+Not directly drawable; only BLT.
+.RE
+.SH BGRT
+.TP
+.B image_address
+Physical address of the raw BMP logo.
+.TP
+.B offset_x , offset_y
+Logo offset on screen.
+.TP
+.B image_width , image_height
+Logo size in pixels.
+.TP
+.B status
+BGRT status byte (bit 0 = DISPLAYED).
+.TP
+.B image_type
+BGRT image type (0 = bitmap).
+The helper
+.B rect()
+returns the on-screen bounding box
+.IR (x0, y0, x1, y1) ,
+where \fIx1\fR and \fIy1\fR are exclusive.
+.SH BOOT CONFIG
+The bootloader reads
+.I \eEFI\eleon\eboot.toml
+(kept on the boot volume, written by
+.BR "lbt config set" )
+and validates it with the shared
+.B boot_config
+parser. Supported keys:
+.TP
+.B timeout
+Seconds to wait before booting the default entry (integer).
+.TP
+.B default_entry
+Label of the entry booted when the timeout elapses (string).
+.TP
+.B theme
+Splash theme file (string).
+.TP
+.B splash
+Whether the splash screen is enabled (true or false).
+.TP
+.B entries_file
+Path of the JSONC entries file written by the bootloader (string, e.g.
+\fI\eEFI\eleon\eentries.jsonc\fR).
+String values accept both TOML basic strings (\fB"..."\fR, with escapes) and
+TOML literal strings (\fB'...'\fR, no escapes); the latter is what serde/toml
+emits for backslash-heavy values. Unknown keys are ignored; a missing or
+unparsable file yields all-default values, never a blocked boot. The resolved
+config is recorded in
+.BR bootinfo.json .
+.SH BOOTINFO.JSON
+The bootloader serializes the live geometry + resolved config to
+\eEFI\eleon\ebootinfo.json with the fields
+.BR framebuffer
+.RB ( base ,
+.BR size ,
+.BR width ,
+.BR height ,
+.BR stride ,
+.BR format ),
+.BR bgrt
+.RB ( image_address ,
+.BR offset_x ,
+.BR offset_y ,
+.BR image_width ,
+.BR image_height ,
+.BR status ,
+.BR image_type )
+or
+.BR null ,
+and
+.BR boot_config
+.RB ( timeout ,
+.BR default_entry ,
+.BR theme ,
+.BR splash ,
+.BR entries_file ).
+This is the file consumed by
+.BR lbt (1).
+.SH SEE ALSO
+.BR lbl (1),
+.BR lbt (1)
+.SH AUTHOR
+Mapuse
+.SH LICENSE
+MIT

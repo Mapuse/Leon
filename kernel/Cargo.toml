@@ -1,0 +1,24 @@
+[package]
+name = "lbl-kernel"
+version = "0.7.0"
+edition = "2024"
+license = "MIT"
+description = "lbl-kernel — minimal EFI-stub kernel that verifies the flicker-free BGRT/GOP handoff"
+autotests = false
+autobenches = false
+
+[dependencies]
+# The kernel needs only the shared *representations* (pixel format, frame
+# buffer, BGRT); it no longer receives a handoff blob from the loader.
+leon-common = { path = "../common", default-features = false }
+# The kernel is a plain UEFI application (an "EFI stub") so it needs the full
+# `uefi` runtime: GOP, configuration tables, memory map via ExitBootServices.
+uefi = { version = "0.39", features = ["alloc", "global_allocator"] }
+
+[[bin]]
+name = "lbl-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[workspace]
