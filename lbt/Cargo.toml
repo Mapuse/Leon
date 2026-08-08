@@ -3,21 +3,25 @@ name = "lbt"
 version = "0.7.0"
 edition = "2024"
 license = "MIT"
-description = "lbt — Leon Build Tool. Discover boot entries, run the boot-manager TUI, manage boot config"
+description = "lbt — Leon Build Tool. Discover boot entries, build ESP/ISO/IMG images, query geometry, control the cps subsystem. Boot configuration and boot control live in the sibling `lbc` binary"
+
+[lib]
+name = "lbt"
+path = "src/lib.rs"
 
 [[bin]]
 name = "lbt"
 path = "src/main.rs"
 
+[features]
+# Deep control of the Cudane Python subsystem (cps): themes, TUIs, plugins.
+# Off by default: `cps` links libpython through pyo3, which cannot be linked
+# into the musl `lbt` build, so the default build stays pure Rust. Enable it
+# for the host (non-musl) target with `cargo build -p lbt --features cps`.
+cps = ["dep:cps"]
+
 [dependencies]
-leon-common = { path = "../common" }
-clap = { version = "4", features = ["derive"] }
+cps = { git = "https://github.com/Mapuse/CPS", rev = "e7cbf7d6fb7b9e2a29eb93778c7bf170e4f4ea7b", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
 anyhow = "1"
-ratatui = "0.29"
-crossterm = "0.28"
-
-[dev-dependencies]
-libc = "0.2"

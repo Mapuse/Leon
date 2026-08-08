@@ -8,7 +8,7 @@
 //!
 //! Discovery is recursive (vendor subdirectories are scanned too, matching
 //! `lbt discover`), and labels are file stems (`kernel`, `shimx64`, ...) so a
-//! `default_entry` written by `lbt config set` always matches at boot.
+//! `default_entry` written by `lbc config set` always matches at boot.
 //!
 //! The discovered entries are written to a JSONC file on the boot volume
 //! (configurable via the `entries_file` boot config key, default
@@ -51,7 +51,7 @@ pub struct Entry {
 /// directory-then-name order. The firmware fallback directory is skipped so
 /// the loader itself never shows up as a boot entry. Entry labels are the
 /// file name without its `.efi` extension, matching what host tooling (`lbt`)
-/// reports — so `default_entry` written by `lbt config set` matches here.
+/// reports — so `default_entry` written by `lbc config set` matches here.
 pub fn discover(fs: &mut FileSystem) -> Vec<Entry> {
     let mut entries = Vec::new();
     let Ok(iter) = fs.read_dir(Path::new(EFI_ROOT)) else {

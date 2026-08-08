@@ -1,0 +1,23 @@
+[package]
+name = "lbc"
+version = "0.7.0"
+edition = "2024"
+license = "MIT"
+description = "lbc — Leon Boot Configuration. Manage the boot config and boot control."
+
+[[bin]]
+name = "lbc"
+path = "src/main.rs"
+
+[dependencies]
+lbt = { path = "../lbt" }
+leon-common = { path = "../common" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+ratatui = "0.29"
+crossterm = "0.28"
+
+[dev-dependencies]
+libc = "0.2"

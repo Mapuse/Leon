@@ -1,4 +1,4 @@
-//! The ratatui implementation of `lbt tui`: the keyboard-driven boot-manager
+//! The ratatui implementation of `lbc tui`: the keyboard-driven boot-manager
 //! menu.
 //!
 //! Renders the boot entries from a [`Context`](super::tui::Context) in a
@@ -364,7 +364,7 @@ impl App {
         if lines.is_empty() {
             lines.push(Line::styled(
                 if self.filter.is_empty() {
-                    " no boot entries found (run `lbt discover`)".to_string()
+                    " no boot entries found (run `lbc entries list`)".to_string()
                 } else {
                     format!(" no entries match “{}”", self.filter)
                 },

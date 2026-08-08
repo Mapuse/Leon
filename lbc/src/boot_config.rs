@@ -1,15 +1,15 @@
 //! Host-side boot config: `~/.config/leon/boot.toml`, mirrored onto every
 //! mounted ESP as `\EFI\leon\boot.toml` for the bootloader.
 //!
-//! The keys lbt manages (`timeout`, `default_entry`, `theme`, `splash`,
+//! The keys lbc manages (`timeout`, `default_entry`, `theme`, `splash`,
 //! `entries_file`) are exactly the keys `leon_common::boot_config` parses, so
-//! what lbt writes is always what the bootloader reads.
+//! what lbc writes is always what the bootloader reads.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::discovery;
+use lbt::discovery;
 
 pub const CONFIG_KEYS: [&str; 5] = [
     "timeout",
@@ -115,7 +115,7 @@ fn sync_config_to_esps(content: &str) {
     if synced == 0 {
         eprintln!(
             "note: no mounted EFI System Partition could be written; the bootloader only reads \
-             \\EFI\\leon\\boot.toml from the boot volume — mount an ESP and re-run `lbt config set`, \
+             \\EFI\\leon\\boot.toml from the boot volume — mount an ESP and re-run `lbc config set`, \
              or copy ~/.config/leon/boot.toml there manually"
         );
     }
@@ -186,9 +186,9 @@ mod tests {
 
     #[test]
     fn serialized_config_is_parseable_by_the_bootloader() {
-        // lbt writes `boot.toml`; the bootloader reads it with the shared
+        // lbc writes `boot.toml`; the bootloader reads it with the shared
         // `leon_common::boot_config` parser. The two must always agree, so
-        // every key lbt writes must survive that parser.
+        // every key lbc writes must survive that parser.
         let cfg = BootConfig {
             timeout: Some(5),
             default_entry: Some("Cudane Linux".to_string()),

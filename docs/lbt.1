@@ -1,7 +1,7 @@
 .\" Leon Build Tool — Man Page
-.TH LBT 1 "2026-08-07" "lbt 0.7.0" "User Commands"
+.TH LBT 1 "2026-08-08" "lbt 0.7.0" "User Commands"
 .SH NAME
-lbt \- Leon Build Tool: run the boot-manager TUI, manage boot config, inspect geometry and boot entries
+lbt \- Leon Build Tool: inspect geometry and boot entries, build ESP/ISO/IMG images
 .SH SYNOPSIS
 .B lbt
 .B info
@@ -10,24 +10,16 @@ lbt \- Leon Build Tool: run the boot-manager TUI, manage boot config, inspect ge
 .B lbt
 .B discover
 .RI [ \-\-json ]
-.br
-.B lbt
-.B tui
-.br
-.B lbt
-.B config
-.B get
-.RI [ key ]
-.B | set
-.I key
-.I value
 .SH DESCRIPTION
 .B lbt
 is the host-side companion to the Leon bootloader. It introspects the live
 machine (block devices, EFI System Partitions, boot entries, framebuffer and
-BGRT logo geometry), launches a full-screen keyboard-driven boot-manager menu
-(a pure-Rust ratatui app, no embedded Python), and edits the boot
-configuration consumed by the bootloader.
+BGRT logo geometry), and builds bootable ESP/ISO/IMG images.
+Boot configuration and boot control (the boot-manager menu, staging, the boot
+config) moved to the sibling
+.B lbc
+binary — see
+.BR lbc (1).
 .SH COMMANDS
 .SS info
 Print the current framebuffer and BGRT logo geometry.
@@ -57,76 +49,18 @@ Emit the same information as machine-readable JSON with the keys
 .BR esps ,
 and
 .BR boot_entries .
-.SS tui
-Launch the Leon boot-manager menu: a full-screen, keyboard-driven ratatui app
-that mirrors what the bootloader renders at boot. Before it runs, lbt exports
-the live framebuffer + BGRT geometry, the discovered boot entries, and the boot
-config as
-.I LEON_*
-environment variables
-(\fILEON_FB_WIDTH\fR, \fILEON_FB_HEIGHT\fR, \fILEON_FB_STRIDE\fR,
-\fILEON_FB_FORMAT\fR, \fILEON_BOOT_ENTRIES\fR with one
-\fIlabel<TAB>path\fR per line). Entries normally come from live discovery
-(.efi PE/COFF binaries and EFI-stub ELF kernels on mounted ESPs and under
-`/boot`), or from the entries file written by the bootloader; geometry may be
-absent (no framebuffer) — the menu shows a friendly placeholder state.
-.PP
-The menu uses the full keymap: arrows and
-.I hjkl
-to move, PgUp/PgDn, Home/End, \fI1-9\fR/\fI0\fR to jump to the nth entry,
-.I /
-to search with
-.I n
-/
-.I N
-for next/previous match and
-.I p
-to un-filter,
-.I d
-to toggle the detail panel,
-.I h
-to toggle help,
-.I r
-to refresh, Enter or space or
-.I s
-for a boot preview, and
-.I q
-/ Esc / Ctrl+C to quit.
-.SS config
-.TP
-.B config get \fI[key]\fR
-Print one boot config key, or all keys when omitted.
-.TP
-.B config set \fIkey\fR \fIvalue\fR
-Set a boot config key. Supported keys:
-.IR timeout ,
-.IR default_entry ,
-.IR theme ,
-.IR splash ,
-.IR entries_file
-(the former must be
-.B true
-or
-.BR false ).
-The new value is written to
-.I ~/.config/leon/boot.toml
-and mirrored onto every mounted EFI System Partition as
-.IR \eEFI\eleon\eboot.toml ,
-which is what the bootloader reads at boot.
+.SS images
+Build bootable images from a rootfs: `w iso`, `w img`, `w esp` (or the `I`
+namespace). ESP images place the bootloader at
+.IR \eEFI\eBOOT
+and the EFI-stub kernel at
+.IR \eEFI\eleon\ekernel.efi .
 .SH FILES
 .TP
 .I ~/.config/leon/boot.toml
 Host copy of the boot configuration (timeout, default_entry, theme, splash,
-entries_file) written by
-.BR "lbt config set" .
-If absent,
-.B config get
-falls back to the copy on a mounted ESP.
-.TP
-.I \eEFI\eleon\eboot.toml
-The copy the bootloader actually reads, kept on the boot volume (ESP) and
-validated by it at every boot; a missing or broken file simply yields
-defaults.
+entries_file), managed by
+.BR "lbc config" .
 .TP
 .I \eEFI\eleon\ebootinfo.json
 Geometry + resolved config record written by the bootloader at boot time;
@@ -139,6 +73,7 @@ by
 .BR lbt " discover" .
 .SH SEE ALSO
 .BR lbl (1),
+.BR lbc (1),
 .BR leon-common (7)
 .SH AUTHOR
 Mapuse

@@ -1,7 +1,7 @@
 //! Reads and validates the boot configuration on every boot.
 //!
 //! The file lives on the boot volume at `\EFI\leon\boot.toml` and is written by
-//! `lbt config set` (host side). It carries the splash-menu settings
+//! `lbc config set` (host side). It carries the splash-menu settings
 //! (`timeout`, `default_entry`, `theme`, `splash`) and the entries-file
 //! location (`entries_file`); the bootloader's job is to parse and sanity-check
 //! it so a corrupted or hostile file can never derail a boot. Parsing failures

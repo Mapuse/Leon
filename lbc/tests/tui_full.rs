@@ -1,6 +1,6 @@
 //! Full end-to-end keymap test + preview for the boot-manager TUI.
 //!
-//! Boots the real `lbt tui` (the pure-Rust ratatui menu) in a pty, drives
+//! Boots the real `lbc tui` (the pure-Rust ratatui menu) in a pty, drives
 //! every keybinding, asserts the menu responds, and prints every frame.
 //!
 //! The menu renders through ratatui/crossterm, which paints cells in place
@@ -10,7 +10,7 @@
 //! Requires a Linux host. Run from the workspace root:
 //!
 //! ```text
-//! cargo test -p lbt --test tui_full -- --nocapture
+//! cargo test -p lbc --test tui_full -- --nocapture
 //! ```
 //!
 //! `--nocapture` is what makes this a preview: every frame of the TUI is
@@ -305,7 +305,7 @@ impl Tui {
         let stdin = dup(slave.as_raw_fd());
         let stdout = dup(slave.as_raw_fd());
         let stderr = dup(slave.as_raw_fd());
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lbt"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lbc"));
         cmd.arg("tui")
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::from(stdout))
@@ -319,8 +319,8 @@ impl Tui {
         cmd.env("TERM", "xterm-256color");
         cmd.env("LANG", "C.UTF-8");
         cmd.env("LC_ALL", "C.UTF-8");
-        cmd.env("HOME", std::env::temp_dir().join("lbt-tui-test-home"));
-        let child = cmd.spawn().expect("spawn lbt tui");
+        cmd.env("HOME", std::env::temp_dir().join("lbc-tui-test-home"));
+        let child = cmd.spawn().expect("spawn lbc tui");
         drop(slave); // keep the pty alive only via the child's stdio
 
         let fd = master.into_raw_fd();

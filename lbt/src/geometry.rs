@@ -1,4 +1,4 @@
-//! Screen geometry used by `lbt info` and the boot-manager TUI (`lbt tui`).
+//! Screen geometry used by `lbt info` and the boot-manager TUI (`lbc tui`).
 //!
 //! Sources: either a `bootinfo.json` dump written by the bootloader on the
 //! boot volume, or live `/sys` discovery (the active console frame buffer via

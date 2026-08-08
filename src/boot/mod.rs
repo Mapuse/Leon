@@ -31,7 +31,7 @@ pub fn run() -> Result<()> {
     let bgrt = crate::firmware::bgrt::find();
 
     // Read + validate the boot configuration (`\EFI\leon\boot.toml`, written
-    // by `lbt config set`). A missing or broken file simply yields defaults.
+    // by `lbc config set`). A missing or broken file simply yields defaults.
     let boot_config = config::read();
 
     // Discover every boot entry on the ESP and persist it (best-effort).

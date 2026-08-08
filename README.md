@@ -55,7 +55,7 @@ The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**
 - BGRT acquisition — ACPI 2.0 RSDP → XSDT signature walk → BGRT parse with BMP validation
 - GOP frame buffer capture — the current mode's buffer is lifted out untouched
 - Optional `gop-ui` feature — adds a feature-gated GOP framebuffer renderer scaffold for the bootloader, currently used to draw a placeholder splash before the text-mode menu
-- Boot config — `\EFI\leon\boot.toml` is written by `lbt config set` and parsed + validated by the loader at every boot (a broken file yields defaults, never a blocked boot)
+- Boot config — `\EFI\leon\boot.toml` is written by `lbc config set` and parsed + validated by the loader at every boot (a broken file yields defaults, never a blocked boot)
 - Geometry record — every boot records the real geometry + resolved config as `\EFI\leon\bootinfo.json` for host tooling
 - Secure Boot — reads the `SecureBoot`/`SetupMode` global variables, warns on the menu and in the log when it is active, and reports a firmware `ACCESS_DENIED`/`SECURITY_VIOLATION` rejection of an unsigned entry instead of failing silently (`scripts/sign.sh` self-signs the loader + kernel; see `docs/secure-boot.md`)
 - EFI-stub kernel — `lbl-kernel` is a plain UEFI application that acquires GOP + BGRT itself and never receives a handoff blob
@@ -139,7 +139,7 @@ The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**
    -> BMP header validation (dimensions).
 
 3. Read and validate the boot configuration
-   \EFI\leon\boot.toml (written by `lbt config set`) is parsed with the
+   \EFI\leon\boot.toml (written by `lbc config set`) is parsed with the
    shared leon_common::boot_config parser. A missing or broken file
    yields defaults and is logged; it never blocks the boot.
 
@@ -385,7 +385,7 @@ The bootloader reads its configuration from `EFI/leon/boot.toml` on the same vol
 
 `lbt` is a std (host) binary built for the ecosystem target (`x86_64`/`aarch64`-`unknown-linux-musl`) and lives outside the ESP: `make stage`, `make esp`, and `make qemu` build only the bootloader + kernel and never need it (or its transitive dependencies).
 
-`lbt` ships a default, keyboard-driven boot-manager TUI (`lbt tui`) — a pure-Rust ratatui/crossterm app, no embedded Python. It receives live framebuffer + BGRT geometry, discovered boot entries, and the boot config, and uses the full keymap (arrows/`hjkl`, PgUp/PgDn, Home/End, `1-9`/`0`, `/` search with `n`/`N` and `p` un-filter, `d` detail panel, `h` help, `r` refresh, `Enter`/space/`s` boot preview, `q`/Esc/Ctrl+C quit).
+`lbc` ships the keyboard-driven boot-manager TUI (`lbc tui`); `lbt` builds the images — a pure-Rust ratatui/crossterm app, no embedded Python. It receives live framebuffer + BGRT geometry, discovered boot entries, and the boot config, and uses the full keymap (arrows/`hjkl`, PgUp/PgDn, Home/End, `1-9`/`0`, `/` search with `n`/`N` and `p` un-filter, `d` detail panel, `h` help, `r` refresh, `Enter`/space/`s` boot preview, `q`/Esc/Ctrl+C quit).
 
 **Release profile:**
 
@@ -504,7 +504,7 @@ EFI/
 │   └── BOOTAA64.EFI       # lbl chainloader (arm64)
 └── leon/
     ├── kernel.efi         # EFI-stub kernel (a discovered boot entry)
-    ├── boot.toml          # boot config (written by `lbt config set`)
+    ├── boot.toml          # boot config (written by `lbc config set`)
     ├── entries.jsonc      # discovered boot entries (written every boot)
     └── bootinfo.json      # geometry + resolved config record (every boot)
 
@@ -542,7 +542,7 @@ cargo test -p leon-common    # the shared no_std boot.toml parser
 cargo fmt --check
 ```
 
-The `lbt` test suite includes a parity test that feeds everything `lbt config set` serializes through the bootloader's own `leon_common::boot_config` parser, so the host-written file and the loader's reader can never drift apart — including the single-quoted TOML literal strings the serializer emits for backslash-heavy paths like `\EFI\leon\entries.jsonc`.
+The `lbc` test suite includes a parity test that feeds everything `lbc config set` serializes through the bootloader's own `leon_common::boot_config` parser, so the host-written file and the loader's reader can never drift apart — including the single-quoted TOML literal strings the serializer emits for backslash-heavy paths like `\EFI\leon\entries.jsonc`.
 
 **Runtime verification:**
 

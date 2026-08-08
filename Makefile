@@ -1,10 +1,10 @@
 include env.mk
 
-.PHONY: all build bootloader kernel lbt stage install install-man uninstall clean test clippy qemu esp sign
+.PHONY: all build bootloader kernel lbt lbc stage install install-man uninstall clean test clippy qemu esp sign
 
 all: build
 
-build: bootloader kernel lbt
+build: bootloader kernel lbt lbc
 
 bootloader:
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo build --locked --target $(UEFI_TARGET) --profile $(PROFILE)
@@ -12,12 +12,18 @@ bootloader:
 kernel:
 	$(MAKE) -C kernel TARGET=$(UEFI_TARGET) PROFILE=$(PROFILE) build
 
-# Host-side companion tool (`lbt`), explicitly not a default member so the
-# UEFI-only `cargo build`/`clippy` above never try to compile it. Pure Rust:
-# the boot-manager TUI is a ratatui/crossterm app, no embedded Python/cps.
+# Host-side companion tools. `lbt` is the build tool (discovery, geometry,
+# image builders, cps); `lbc` is the boot configuration + boot control binary
+# (boot-manager TUI, boot config, staging). Both are pure Rust and are
+# explicitly not default members so the UEFI-only `cargo build`/`clippy` above
+# never try to compile them.
 lbt:
 	CARGO_TARGET_DIR=$(CURDIR)/target \
 	cargo build --locked --target $(RUST_TARGET) -p lbt --profile $(PROFILE)
+
+lbc:
+	CARGO_TARGET_DIR=$(CURDIR)/target \
+	cargo build --locked --target $(RUST_TARGET) -p lbc --profile $(PROFILE)
 
 # Stage a ready-to-boot ESP tree under build/esp with the UEFI-canonical boot
 # file name for this architecture plus the EFI-stub kernel at its path under
@@ -37,17 +43,17 @@ install: stage install-man
 
 install-man:
 	install -d $(DESTDIR)$(PREFIX)/share/man/man1 $(DESTDIR)$(PREFIX)/share/man/man7
-	install -m 644 docs/lbt.1 docs/lbl.1 $(DESTDIR)$(PREFIX)/share/man/man1/
+	install -m 644 docs/lbt.1 docs/lbl.1 docs/lbc.1 $(DESTDIR)$(PREFIX)/share/man/man1/
 	install -m 644 docs/leon-common.7 $(DESTDIR)$(PREFIX)/share/man/man7/
 
 uninstall:
 	rm -f $(DESTDIR)/EFI/BOOT/$(BOOT_FILE) $(DESTDIR)/EFI/leon/kernel.efi
-	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/lbt.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbl.1 $(DESTDIR)$(PREFIX)/share/man/man7/leon-common.7
+	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/lbt.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbl.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbc.1 $(DESTDIR)$(PREFIX)/share/man/man7/leon-common.7
 
-# Generic host test run: the host-testable workspace crates (`common`, `lbt`)
-# with default features. The `leon` UEFI binary is excluded — a `#![no_main]`
-# EFI application has no host test harness — and no target/feature flags are
-# hard-coded here.
+# Generic host test run: the host-testable workspace crates (`common`, `lbt`,
+# `lbc`) with default features. The `leon` UEFI binary is excluded — a
+# `#![no_main]` EFI application has no host test harness — and no target/feature
+# flags are hard-coded here.
 test:
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked --workspace --exclude leon
 
@@ -55,6 +61,7 @@ clippy:
 	cargo clippy --all-targets --target $(UEFI_TARGET) -- -D warnings
 	$(MAKE) -C kernel TARGET=$(UEFI_TARGET) clippy
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo clippy -p lbt -- -D warnings
+	CARGO_TARGET_DIR=$(CURDIR)/target cargo clippy -p lbc -- -D warnings
 
 qemu: stage
 	ARCH=$(ARCH) ./scripts/run_qemu.sh

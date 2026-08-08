@@ -1,5 +1,5 @@
 //! Minimal parser for `\EFI\leon\boot.toml`, the boot configuration written
-//! by `lbt config set` (host side) and validated by the bootloader every boot.
+//! by `lbc config set` (host side) and validated by the bootloader every boot.
 //!
 //! Only the keys `lbt` manages are understood — `timeout` (integer seconds),
 //! `default_entry`, `theme`, `splash`, `entries_file` — and unknown keys are

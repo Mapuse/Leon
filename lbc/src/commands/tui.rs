@@ -1,17 +1,17 @@
-//! `lbt tui`: the keyboard-driven Leon boot-manager menu (ratatui).
+//! `lbc tui`: the keyboard-driven Leon boot-manager menu (ratatui).
 //!
 //! A pure-Rust, full-screen preview of what Leon renders at boot: the
 //! discovered boot entries, the live framebuffer + BGRT geometry, and the boot
 //! config. Geometry and entries are read directly from the host (the same
-//! `Geometry`/`discovery` modules the other `lbt` commands use); `LEON_BOOT_ENTRIES`
-//! (one `label<TAB>path` per line) overrides live discovery so tests and
-//! embedded runs stay deterministic.
+//! `Geometry`/`discovery` modules the other `lbc` commands use, shared from the
+//! `lbt` library); `LEON_BOOT_ENTRIES` (one `label<TAB>path` per line)
+//! overrides live discovery so tests and embedded runs stay deterministic.
 
 use anyhow::Result;
 
 use crate::boot_config;
-use crate::discovery;
-use crate::geometry::Geometry;
+use lbt::discovery;
+use lbt::geometry::Geometry;
 
 /// One boot entry shown in the menu.
 #[derive(Debug, Clone)]
