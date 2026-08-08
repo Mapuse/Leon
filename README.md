@@ -342,7 +342,8 @@ Nothing is ever printed to the screen. The only place a boot error shows up is t
 Leon is a pure-Rust UEFI application pair — a chainloading bootloader and an EFI-stub kernel — installed onto the ESP.
 
 ```sh
-# Stage a bootable ESP tree under build/esp (auto-detects arch)
+# Stage a bootable ESP tree under build/esp (auto-detects arch; runs `lbc stage`)
+# Use `DESTDIR=/mnt/esp` to stage directly to a mounted ESP root.
 make stage
 
 # Install onto a mounted ESP (also installs docs/man pages)
@@ -432,14 +433,15 @@ The bootloader and kernel are UEFI applications (`*-unknown-uefi`); the host too
 ```sh
 make build                    # bootloader + kernel + lbt, auto arch
 make lbt                      # lbt only (host, musl target)
-make stage                    # ESP tree at build/esp (bootloader + kernel only)
+make stage                    # ESP tree at build/esp (bootloader + kernel only, or DESTDIR=/mnt/esp)
 make install DESTDIR=/mnt/esp # staged install onto a mounted ESP
 make ARCH=arm64 build         # cross-build for arm64
 make test                     # generic host tests (workspace, default features)
+make tui-test                 # live local TUI regression suite for lbc
 make clippy                   # lint everything with -D warnings
-make qemu                     # boot under QEMU/OVMF or AAVMF
+make qemu                     # boot under QEMU/OVMF or QEMU/AAVMF
 make esp                      # GPT ESP image (mtools + fdisk/sgdisk)
-make sign                     # sign the staged tree for Secure Boot
+make sign                     # stage + sign the ESP tree for Secure Boot
 make clean
 ```
 
@@ -537,6 +539,8 @@ cargo clippy --all-targets --target aarch64-unknown-uefi -- -D warnings
 # Host-side unit tests
 cargo test -p lbt            # CLI, discovery, geometry, TUI, boot-config parity
 cargo test -p leon-common    # the shared no_std boot.toml parser
+cargo test -p lbc --test tui_full -- --nocapture
+make tui-test                 # local PTY-driven `lbc tui` regression suite
 
 # Format check
 cargo fmt --check
@@ -548,6 +552,7 @@ The `lbc` test suite includes a parity test that feeds everything `lbc config se
 
 | Method | Command | What it verifies |
 |--------|---------|------------------|
+| Live TUI | `make tui-test` | Local PTY-driven `lbc tui` keymap and menu regression suite |
 | QEMU/OVMF | `make qemu` | Silent chainload to the kernel marker under emulation |
 | QEMU/AAVMF | `make ARCH=arm64 qemu` | The same on arm64 |
 | QEMU Secure Boot | `make esp` + snakeoil-signed images (`docs/secure-boot.md`) | Menu warning, signed-kernel boot, unsigned-kernel `ACCESS_DENIED` reporting |

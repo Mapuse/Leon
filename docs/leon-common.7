@@ -8,13 +8,17 @@ documents the types shared between the Leon bootloader
 .BR lbl ,
 its EFI-stub kernel
 .BR lbl-kernel ,
-and the host build tool
-.BR lbt :
+and the host-side tools
+.BR lbt
+and
+.BR lbc :
 the GOP frame buffer description, the ACPI BGRT logo metadata, and the boot
 configuration file the bootloader validates at every boot.
-There is no handoff blob: the kernel is a plain UEFI application that acquires
-the GOP framebuffer and the BGRT itself after being chainloaded, so these types
-are shared purely as a common representation. Every type is
+This crate defines the common on-disk and in-memory representations used by
+both UEFI boot-time code and host-side tooling. There is no handoff blob: the
+kernel is a plain UEFI application that re-acquires the GOP framebuffer and the
+BGRT after chainloading, so these types are shared purely as a common
+representation across the boot path. Every type is
 .B repr(C)
 and the crate is
 .B #![no_std]

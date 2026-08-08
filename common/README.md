@@ -60,6 +60,19 @@ literal strings (`'...'`, no escapes) — the latter is what serde/toml emits fo
 backslash-heavy values such as `entries_file = '\EFI\leon\entries.jsonc'`.
 Unknown keys are ignored so the bootloader tolerates forward-compatible files.
 
+## Host integration
+
+The `common` crate is shared by both firmware and host tooling. It provides
+the exact same ABI for `Framebuffer`, `Bgrt`, and `boot.toml` semantics to:
+
+- `lbt`, which discovers ESP contents, reads `bootinfo.json`, and writes
+  `boot.toml`.
+- `lbc`, which stages EFI trees, runs the live `lbc tui` boot-manager TUI,
+  and exercises the shared parser in regression tests.
+
+This shared dependency prevents drift between what the host tools write and
+what the UEFI bootloader reads.
+
 ## `bootinfo.json` record
 
 Every boot, the loader writes the live geometry + resolved config as JSON on

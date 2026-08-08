@@ -10,6 +10,7 @@ pub mod config;
 pub mod entries;
 pub mod image;
 pub mod menu;
+pub mod serial;
 
 use alloc::vec::Vec;
 

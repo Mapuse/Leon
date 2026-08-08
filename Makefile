@@ -1,6 +1,6 @@
 include env.mk
 
-.PHONY: all build bootloader kernel lbt lbc stage install install-man uninstall clean test clippy qemu esp sign
+.PHONY: all build bootloader kernel lbt lbc stage install install-man uninstall clean tui-test clippy qemu esp sign
 
 all: build
 
@@ -25,21 +25,23 @@ lbc:
 	CARGO_TARGET_DIR=$(CURDIR)/target \
 	cargo build --locked --target $(RUST_TARGET) -p lbc --profile $(PROFILE)
 
-# Stage a ready-to-boot ESP tree under build/esp with the UEFI-canonical boot
-# file name for this architecture plus the EFI-stub kernel at its path under
-# \EFI\leon\. Only needs bootloader + kernel: `lbt` is not part of the ESP.
-stage: bootloader kernel
-	mkdir -p $(ESP)/EFI/BOOT $(ESP)/EFI/leon
-	install -m 644 $(BL_EFI) $(ESP)/EFI/BOOT/$(BOOT_FILE)
-	install -m 644 $(KERNEL_EFI) $(ESP)/EFI/leon/kernel.efi
+# Stage a ready-to-boot ESP tree under build/esp or the mounted ESP root
+# specified by DESTDIR. This mirrors the new `lbc stage` command and keeps the
+# bootloader, EFI stub kernel, and boot config in sync.
+STAGE_DEST := $(if $(DESTDIR),$(DESTDIR),$(ESP))
+stage: build
+	CARGO_TARGET_DIR=$(CURDIR)/target \
+	cargo run --locked -p lbc -- stage --dest "$(STAGE_DEST)" --arch $(ARCH)
 
 # Install onto a mounted ESP (e.g. `make install DESTDIR=/mnt/esp`). The EFI
-# tree goes at the ESP root (boot files must sit in \EFI\BOOT); only host-side
-# artifacts (man pages) use the $(PREFIX) convention.
-install: stage install-man
-	install -d $(DESTDIR)/EFI/BOOT $(DESTDIR)/EFI/leon
-	install -m 644 $(BL_EFI) $(DESTDIR)/EFI/BOOT/$(BOOT_FILE)
-	install -m 644 $(KERNEL_EFI) $(DESTDIR)/EFI/leon/kernel.efi
+# tree goes at the ESP root (boot files must sit in \EFI\BOOT); man pages are
+# installed under the selected $(PREFIX) rooted at DESTDIR.
+install: install-man
+	if [ -z "$(DESTDIR)" ]; then \
+		echo "DESTDIR must be set for install" >&2; \
+		exit 1; \
+	fi
+	$(MAKE) stage DESTDIR=$(DESTDIR)
 
 install-man:
 	install -d $(DESTDIR)$(PREFIX)/share/man/man1 $(DESTDIR)$(PREFIX)/share/man/man7
@@ -56,6 +58,11 @@ uninstall:
 # flags are hard-coded here.
 test:
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked --workspace --exclude leon
+
+# Run the TUI regression suite locally, including the live full-terminal test.
+# This verifies the `lbc tui` experience and the new TUI keymap handling.
+tui-test:
+	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked -p lbc --test tui_full -- --nocapture
 
 clippy:
 	cargo clippy --all-targets --target $(UEFI_TARGET) -- -D warnings

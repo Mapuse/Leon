@@ -28,8 +28,9 @@ standalone replacement for efitools' `cert-to-efi-sig-list`).
 scripts/sign.sh setup
 
 # 2. Stage and sign the ESP tree in place.
-make stage
-scripts/sign.sh sign-all        # or: make sign
+make sign
+# or: make stage && scripts/sign.sh sign-all
+#    `make sign` stages first, then signs the staged tree
 
 # 3. Copy build/esp/* to your ESP and enroll the keys (below).
 ```

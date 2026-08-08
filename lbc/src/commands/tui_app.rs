@@ -1,4 +1,4 @@
-//! The ratatui implementation of `lbc tui`: the keyboard-driven boot-manager
+//! implementation of `lbc tui`: the keyboard-driven boot-manager
 //! menu.
 //!
 //! Renders the boot entries from a [`Context`](super::tui::Context) in a
@@ -20,7 +20,7 @@ use ratatui::{Frame, Terminal};
 
 use super::tui::Context;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -31,7 +31,7 @@ use crossterm::terminal::{
 /// previous match, `d` details, `h` help, `r` refresh, `s`/space/Enter
 /// boot-preview, `Esc` dismiss (help → preview → filter → quit), `q` quit.
 const FOOTER_HINT: &str = "↑↓/jk move · PgUp/PgDn · Home/End · 1-9 jump · / search · n/N next/prev · d details · \
-     h help · r refresh · s/space preview · Enter boot · Esc dismiss · q quit";
+     h/? help · r refresh · s/space preview · Enter boot · Esc dismiss · q/Ctrl+C quit";
 
 const HELP_LINES: &[&str] = &[
     "LEON Boot Manager — keys",
@@ -41,9 +41,11 @@ const HELP_LINES: &[&str] = &[
     "  Home / End           first / last entry",
     "  1-9 / 0              jump to entry 1-10",
     "  / <text>             filter entries (substring match)",
+    "  Ctrl+U               clear search",
     "  n / N / p            next / previous match",
     "  d                    toggle the details pane",
-    "  h                    this help overlay",
+    "  h / ?                this help overlay",
+    "  Ctrl+C               quit",
     "  r                    re-read geometry, entries, boot config",
     "  s / Space / Enter    preview the selected entry (boot preview)",
     "  Esc                  dismiss help / preview / filter, then quit",
@@ -64,6 +66,10 @@ pub struct App {
     filtered: Vec<usize>,
     /// Position within `filtered` that the `▶` marker points at.
     selected: usize,
+    /// Top visible row within `filtered`.
+    scroll_offset: usize,
+    /// Cached number of list rows currently visible.
+    page_height: usize,
     /// The `/` search query. Empty means no filter. `editing` is true while
     /// the user is typing (the prompt line is shown).
     filter: String,
@@ -82,6 +88,8 @@ impl App {
             context,
             filtered: Vec::new(),
             selected: 0,
+            scroll_offset: 0,
+            page_height: 0,
             filter: String::new(),
             editing: false,
             show_details: false,
@@ -124,7 +132,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        if key.kind != KeyEventKind::Press {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
         }
         if self.editing {
@@ -143,9 +151,16 @@ impl App {
                 self.filter.push(c);
                 self.rebuild_filter();
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace | KeyCode::Delete => {
                 self.filter.pop();
                 self.rebuild_filter();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.filter.clear();
+                self.rebuild_filter();
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit = true;
             }
             KeyCode::Enter => {
                 self.editing = false;
@@ -163,7 +178,10 @@ impl App {
     fn on_key_browsing(&mut self, key: KeyEvent) {
         self.status = None;
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit = true
+            }
             // Esc dismisses whatever is open: help, then preview, then a
             // committed filter, then the app itself.
             KeyCode::Esc => {
@@ -182,18 +200,23 @@ impl App {
             KeyCode::Char('/') => {
                 self.filter.clear();
                 self.editing = true;
+                self.show_help = false;
+                self.preview.open = false;
                 self.rebuild_filter();
             }
             KeyCode::Char('n') => self.move_selection(1),
             KeyCode::Char('N') | KeyCode::Char('p') => self.move_selection(-1),
             KeyCode::Char('d') => self.show_details = !self.show_details,
-            KeyCode::Char('h') => self.show_help = !self.show_help,
+            KeyCode::Char('h') | KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Char('r') => {
                 self.context = Context::load();
                 self.filter.clear();
                 self.editing = false;
-                self.rebuild_filter();
+                self.show_help = false;
+                self.preview.open = false;
                 self.selected = 0;
+                self.scroll_offset = 0;
+                self.rebuild_filter();
                 self.status = Some(format!(
                     "refreshed: {} entries, {} shown",
                     self.context.entries.len(),
@@ -211,12 +234,13 @@ impl App {
                 };
                 if nth < self.filtered.len() {
                     self.selected = nth;
+                    self.ensure_visible();
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageUp => self.move_selection(-10),
-            KeyCode::PageDown => self.move_selection(10),
+            KeyCode::PageUp => self.move_selection_page(-1),
+            KeyCode::PageDown => self.move_selection_page(1),
             KeyCode::Home => self.move_selection_to_start(),
             KeyCode::End => self.move_selection_to_end(),
             _ => {}
@@ -237,9 +261,8 @@ impl App {
             .filter(|(_, e)| query.is_empty() || e.label.to_lowercase().contains(&query))
             .map(|(i, _)| i)
             .collect();
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
-        }
+        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.ensure_visible();
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -248,19 +271,46 @@ impl App {
         }
         let len = self.filtered.len() as isize;
         let mut next = self.selected as isize + delta;
-        next = next.rem_euclid(len);
+        next = next.clamp(0, len - 1);
         self.selected = next as usize;
+        self.ensure_visible();
+    }
+
+    fn move_selection_page(&mut self, direction: isize) {
+        if self.filtered.is_empty() {
+            return;
+        }
+        let page = self.page_height.max(1) as isize;
+        let len = self.filtered.len() as isize;
+        let next = (self.selected as isize + direction * page).clamp(0, len - 1);
+        self.selected = next as usize;
+        self.ensure_visible();
+    }
+
+    fn ensure_visible(&mut self) {
+        if self.page_height == 0 || self.filtered.is_empty() {
+            return;
+        }
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + self.page_height {
+            self.scroll_offset = self.selected + 1 - self.page_height;
+        }
     }
 
     fn move_selection_to_start(&mut self) {
         if !self.filtered.is_empty() {
             self.selected = 0;
+            self.scroll_offset = 0;
         }
     }
 
     fn move_selection_to_end(&mut self) {
         if !self.filtered.is_empty() {
             self.selected = self.filtered.len() - 1;
+            if self.page_height > 0 && self.selected + 1 > self.page_height {
+                self.scroll_offset = self.selected + 1 - self.page_height;
+            }
         }
     }
 
@@ -272,7 +322,7 @@ impl App {
 
     // -- drawing ----------------------------------------------------------
 
-    fn draw(&self, frame: &mut Frame) {
+    fn draw(&mut self, frame: &mut Frame) {
         let area = frame.buffer_mut().area;
         let chunks = Layout::vertical([
             Constraint::Length(1),
@@ -345,20 +395,24 @@ impl App {
         );
     }
 
-    fn draw_list(&self, frame: &mut Frame, area: Rect) {
+    fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .title(" LEON Boot Manager ");
         let inner = block.inner(area);
 
-        let mut lines: Vec<Line> = Vec::with_capacity(self.filtered.len() + 1);
-        for (row, &entry_idx) in self.filtered.iter().enumerate() {
-            if row >= inner.height as usize {
+        self.page_height = inner.height as usize;
+        self.ensure_visible();
+        let start = self.scroll_offset.min(self.filtered.len());
+
+        let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize + 1);
+        for (visible_row, entry_idx) in self.filtered.iter().skip(start).enumerate() {
+            if visible_row >= inner.height as usize {
                 break;
             }
-            let entry = &self.context.entries[entry_idx];
-            lines.push(self.entry_line(row, entry));
+            let entry = &self.context.entries[*entry_idx];
+            lines.push(self.entry_line(start + visible_row, entry));
         }
 
         if lines.is_empty() {
@@ -456,9 +510,12 @@ impl App {
             .iter()
             .map(|l| Line::styled((*l).to_string(), Style::default()))
             .collect();
+        let max_width = area.width.saturating_sub(8).max(20);
+        let width = max_width.min(60);
+        let height = (HELP_LINES.len() + 2) as u16;
         frame.render_widget(
             Paragraph::new(lines).block(block),
-            centered(area, 60, (HELP_LINES.len() + 2) as u16),
+            centered(area, width, height.min(area.height.saturating_sub(4))),
         );
     }
 
@@ -484,10 +541,11 @@ impl App {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .title(" Boot preview ");
-        let height = lines.len() as u16 + 2;
+        let width = area.width.saturating_sub(8).min(60).max(20);
+        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
         frame.render_widget(
             Paragraph::new(lines).block(block),
-            centered(area, 60, height),
+            centered(area, width, height),
         );
     }
 }
@@ -579,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn digits_and_wraparound_navigation() {
+    fn digits_navigation_and_non_wrapping_bounds() {
         let mut app = App::new(ctx());
         press(&mut app, KeyCode::Char('3'));
         assert_eq!(app.selected, 2);
@@ -589,9 +647,9 @@ mod tests {
         press(&mut app, KeyCode::End);
         assert_eq!(app.selected, 5);
         press(&mut app, KeyCode::Down);
-        assert_eq!(app.selected, 0); // wraps
-        press(&mut app, KeyCode::Up);
         assert_eq!(app.selected, 5);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.selected, 4);
     }
 
     #[test]
@@ -607,6 +665,92 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(!app.preview.open);
         assert!(!app.quit);
+    }
+
+    #[test]
+    fn question_mark_toggles_help() {
+        let mut app = App::new(ctx());
+        assert!(!app.show_help);
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help);
+        press(&mut app, KeyCode::Char('?'));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn page_up_page_down_moves_selection_by_page() {
+        let mut app = App::new(ctx());
+        app.filtered = (0..20).collect();
+        app.page_height = 5;
+        app.selected = 0;
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.selected, 5);
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.selected, 10);
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.selected, 5);
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn ensure_visible_scrolls_selection_into_view() {
+        let mut app = App::new(ctx());
+        app.filtered = (0..20).collect();
+        app.page_height = 5;
+        app.selected = 0;
+        app.scroll_offset = 0;
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected, 5);
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn ctrl_c_quits() {
+        let mut app = App::new(ctx());
+        app.on_key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        });
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn ctrl_u_clears_search() {
+        let mut app = App::new(ctx());
+        press(&mut app, KeyCode::Char('/'));
+        for c in "arch".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(app.filter, "arch");
+        app.on_key(KeyEvent {
+            code: KeyCode::Char('u'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        });
+        assert_eq!(app.filter, "");
+        assert!(app.editing);
+    }
+
+    #[test]
+    fn delete_backspace_work_in_search() {
+        let mut app = App::new(ctx());
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('b'));
+        assert_eq!(app.filter, "ab");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.filter, "a");
+        press(&mut app, KeyCode::Delete);
+        assert_eq!(app.filter, "");
     }
 
     #[test]
@@ -626,5 +770,35 @@ mod tests {
         assert_eq!(app.filter, "");
         press(&mut app, KeyCode::Esc);
         assert!(app.quit);
+    }
+
+    #[test]
+    fn refresh_resets_ui_state() {
+        let mut app = App::new(ctx());
+        app.show_help = true;
+        app.preview.open = true;
+        app.filter = "arch".into();
+        app.rebuild_filter();
+        app.on_key(KeyEvent {
+            code: KeyCode::Char('r'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        });
+        assert!(!app.show_help);
+        assert!(!app.preview.open);
+        assert_eq!(app.filter, "");
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn slash_search_clears_preview_help() {
+        let mut app = App::new(ctx());
+        app.show_help = true;
+        app.preview.open = true;
+        press(&mut app, KeyCode::Char('/'));
+        assert!(!app.show_help);
+        assert!(!app.preview.open);
+        assert!(app.editing);
     }
 }

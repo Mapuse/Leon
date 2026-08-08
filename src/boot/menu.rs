@@ -36,6 +36,7 @@ use leon_common::boot_config::BootConfig;
 use crate::secure_boot::{self, SecureBootState};
 
 use super::entries::{Entry, cstr_lossy, push_u32};
+use super::serial::{Console as SerialConsole, MenuKey};
 
 /// Default menu timeout in seconds when `boot.toml` leaves it unset.
 const DEFAULT_TIMEOUT: u32 = 5;
@@ -168,6 +169,8 @@ pub fn run(cfg: &BootConfig, entries: &[Entry], secure_boot: SecureBootState) ->
             let mut drawn_second = u32::MAX;
             let mut dirty_full = true;
             let mut dirty_rows = false;
+            let mut serial = SerialConsole::open();
+            let mut disarmed = false;
             loop {
                 if dirty_full {
                     let remaining = remaining_seconds(elapsed_ms, deadline_ms);
@@ -178,6 +181,7 @@ pub fn run(cfg: &BootConfig, entries: &[Entry], secure_boot: SecureBootState) ->
                         remaining,
                         timeout,
                         warn,
+                        disarmed,
                     };
                     draw_all(out, &layout, &frame);
                     drawn_second = remaining;
@@ -192,73 +196,104 @@ pub fn run(cfg: &BootConfig, entries: &[Entry], secure_boot: SecureBootState) ->
                 let remaining = remaining_seconds(elapsed_ms, deadline_ms);
                 if remaining != drawn_second {
                     drawn_second = remaining;
-                    draw_status(out, &layout, remaining, timeout);
+                    draw_status(out, &layout, remaining, timeout, disarmed);
                 }
-                match input.read_key() {
-                    Ok(Some(Key::Special(ScanCode::UP))) if selected > 0 => {
-                        prev_selected = selected;
-                        selected -= 1;
-                        if selected < scroll_top {
-                            scroll_top = selected;
-                            dirty_full = true;
-                        } else {
-                            dirty_rows = true;
-                        }
+                let mut keys = Vec::new();
+                while let Ok(Some(key)) = input.read_key() {
+                    if let Some(menu_key) = key_from_conin(key) {
+                        keys.push(menu_key);
                     }
-                    Ok(Some(Key::Special(ScanCode::DOWN))) if selected + 1 < entries.len() => {
-                        prev_selected = selected;
-                        selected += 1;
-                        if selected >= scroll_top + layout.entry_rows {
-                            scroll_top = selected + 1 - layout.entry_rows;
-                            dirty_full = true;
-                        } else {
-                            dirty_rows = true;
-                        }
-                    }
-                    Ok(Some(Key::Special(ScanCode::HOME))) if selected > 0 => {
-                        prev_selected = selected;
-                        selected = 0;
-                        scroll_top = 0;
-                        dirty_full = true;
-                    }
-                    Ok(Some(Key::Special(ScanCode::END))) if selected + 1 < entries.len() => {
-                        prev_selected = selected;
-                        selected = entries.len() - 1;
-                        if selected >= scroll_top + layout.entry_rows {
-                            scroll_top = selected + 1 - layout.entry_rows;
-                        }
-                        dirty_full = true;
-                    }
-                    Ok(Some(Key::Special(ScanCode::PAGE_UP))) if selected > 0 => {
-                        prev_selected = selected;
-                        selected = selected.saturating_sub(layout.entry_rows);
-                        if selected < scroll_top {
-                            scroll_top = selected;
-                        }
-                        dirty_full = true;
-                    }
-                    Ok(Some(Key::Special(ScanCode::PAGE_DOWN))) if selected + 1 < entries.len() => {
-                        prev_selected = selected;
-                        selected = (selected + layout.entry_rows).min(entries.len() - 1);
-                        if selected >= scroll_top + layout.entry_rows {
-                            scroll_top = selected + 1 - layout.entry_rows;
-                        }
-                        dirty_full = true;
-                    }
-                    Ok(Some(Key::Printable(c))) if is_enter(c) => {
-                        let _ = out.set_color(Color::LightGray, Color::Black);
-                        let _ = out.enable_cursor(true);
-                        return selected;
-                    }
-                    _ => {}
                 }
-                if elapsed_ms >= deadline_ms {
+                if let Some(console) = serial.as_mut() {
+                    keys.extend(console.poll());
+                }
+                let mut boot_idx = None;
+                for key in keys {
+                    match key {
+                        MenuKey::Up if selected > 0 => {
+                            prev_selected = selected;
+                            selected -= 1;
+                            if selected < scroll_top {
+                                scroll_top = selected;
+                                dirty_full = true;
+                            } else {
+                                dirty_rows = true;
+                            }
+                        }
+                        MenuKey::Down if selected + 1 < entries.len() => {
+                            prev_selected = selected;
+                            selected += 1;
+                            if selected >= scroll_top + layout.entry_rows {
+                                scroll_top = selected + 1 - layout.entry_rows;
+                                dirty_full = true;
+                            } else {
+                                dirty_rows = true;
+                            }
+                        }
+                        MenuKey::Home if selected > 0 => {
+                            prev_selected = selected;
+                            selected = 0;
+                            scroll_top = 0;
+                            dirty_full = true;
+                        }
+                        MenuKey::End if selected + 1 < entries.len() => {
+                            prev_selected = selected;
+                            selected = entries.len() - 1;
+                            if selected >= scroll_top + layout.entry_rows {
+                                scroll_top = selected + 1 - layout.entry_rows;
+                            }
+                            dirty_full = true;
+                        }
+                        MenuKey::PageUp if selected > 0 => {
+                            prev_selected = selected;
+                            selected = selected.saturating_sub(layout.entry_rows);
+                            if selected < scroll_top {
+                                scroll_top = selected;
+                            }
+                            dirty_full = true;
+                        }
+                        MenuKey::PageDown if selected + 1 < entries.len() => {
+                            prev_selected = selected;
+                            selected = (selected + layout.entry_rows).min(entries.len() - 1);
+                            if selected >= scroll_top + layout.entry_rows {
+                                scroll_top = selected + 1 - layout.entry_rows;
+                            }
+                            dirty_full = true;
+                        }
+                        MenuKey::Jump(n) if n < entries.len() => {
+                            prev_selected = selected;
+                            selected = n;
+                            if selected < scroll_top || selected >= scroll_top + layout.entry_rows {
+                                scroll_top = selected.saturating_sub(layout.entry_rows.saturating_sub(1));
+                                dirty_full = true;
+                            } else {
+                                dirty_rows = true;
+                            }
+                        }
+                        MenuKey::Esc => {
+                            if !disarmed {
+                                disarmed = true;
+                                dirty_full = true;
+                            }
+                        }
+                        MenuKey::Enter => boot_idx = Some(selected),
+                        _ => {}
+                    }
+                }
+                if let Some(idx) = boot_idx {
+                    let _ = out.set_color(Color::LightGray, Color::Black);
+                    let _ = out.enable_cursor(true);
+                    return idx;
+                }
+                if !disarmed && elapsed_ms >= deadline_ms {
                     let _ = out.set_color(Color::LightGray, Color::Black);
                     let _ = out.enable_cursor(true);
                     return default_idx;
                 }
                 boot::stall(Duration::from_millis(100));
-                elapsed_ms = elapsed_ms.saturating_add(100);
+                if !disarmed {
+                    elapsed_ms = elapsed_ms.saturating_add(100);
+                }
             }
         })
     })
@@ -272,6 +307,7 @@ struct Frame<'a> {
     remaining: u32,
     timeout: u32,
     warn: Option<&'a str>,
+    disarmed: bool,
 }
 
 /// Renders the whole menu frame: borders, title, entries, status, warning and
@@ -298,7 +334,7 @@ fn draw_all(out: &mut Output, l: &Layout, f: &Frame) {
         i += 1;
     }
     hline(out, l, l.status_row - 1, HDIV, HLINE, UDIV);
-    draw_status(out, l, f.remaining, f.timeout);
+    draw_status(out, l, f.remaining, f.timeout, f.disarmed);
     if let (Some(row), Some(warn)) = (l.warn_row, f.warn) {
         draw_warning(out, l, row, warn);
     }
@@ -416,22 +452,36 @@ fn clear_row(out: &mut Output, l: &Layout, row: usize) {
 }
 
 /// The status bar: navigation help on the left, the countdown plus a
-/// shrinking progress bar on the right.
-fn draw_status(out: &mut Output, l: &Layout, remaining: u32, timeout: u32) {
+/// shrinking progress bar on the right. When Esc disarmed the countdown
+/// (`paused`), the right side reads `paused` instead.
+fn draw_status(out: &mut Output, l: &Layout, remaining: u32, timeout: u32, paused: bool) {
     let _ = out.set_color(Color::LightGray, Color::Black);
-    let help = cstr16!("↑/↓ move   Enter boot");
+    let help = cstr16!("↑/↓ move   Enter boot   Esc pause");
     let mut right = CString16::new();
-    right.push_str(cstr16!("boot in "));
-    push_u32(&mut right, remaining);
-    right.push_str(cstr16!("s "));
-    let filled = if timeout == 0 {
-        0
+    let bar = if paused {
+        right.push_str(cstr16!("paused"));
+        CString16::new()
     } else {
-        (u64::from(remaining) * BAR_WIDTH as u64 / u64::from(timeout)) as usize
+        right.push_str(cstr16!("boot in "));
+        push_u32(&mut right, remaining);
+        right.push_str(cstr16!("s "));
+        let filled = if timeout == 0 {
+            0
+        } else {
+            (u64::from(remaining) * BAR_WIDTH as u64 / u64::from(timeout)) as usize
+        };
+        let mut b = CString16::new();
+        for _ in 0..filled.min(BAR_WIDTH) {
+            b.push(FILL);
+        }
+        for _ in filled.min(BAR_WIDTH)..BAR_WIDTH {
+            b.push(EMPTY);
+        }
+        b
     };
     let pad = l
         .content_w
-        .saturating_sub(help.num_chars() + right.num_chars() + BAR_WIDTH);
+        .saturating_sub(help.num_chars() + right.num_chars() + bar.num_chars());
 
     let mut seg = CString16::new();
     seg.push(VLINE);
@@ -445,29 +495,7 @@ fn draw_status(out: &mut Output, l: &Layout, remaining: u32, timeout: u32) {
     let right_col = l.frame_left + 1 + help.num_chars() + pad;
     let _ = out.set_color(Color::Yellow, Color::Black);
     write_at(out, l, right_col, l.status_row, right.as_ref());
-    let mut bar = CString16::new();
-    for _ in 0..filled.min(BAR_WIDTH) {
-        bar.push(FILL);
-    }
-    write_at(
-        out,
-        l,
-        right_col + right.num_chars(),
-        l.status_row,
-        bar.as_ref(),
-    );
-    let _ = out.set_color(Color::DarkGray, Color::Black);
-    let mut rest = CString16::new();
-    for _ in filled.min(BAR_WIDTH)..BAR_WIDTH {
-        rest.push(EMPTY);
-    }
-    write_at(
-        out,
-        l,
-        right_col + right.num_chars() + filled.min(BAR_WIDTH),
-        l.status_row,
-        rest.as_ref(),
-    );
+    write_at(out, l, right_col + right.num_chars(), l.status_row, bar.as_ref());
     let _ = out.set_color(Color::LightGray, Color::Black);
     write_glyph(out, l, l.frame_left + l.frame_w - 1, l.status_row, VLINE);
 }
@@ -533,8 +561,27 @@ fn remaining_seconds(elapsed_ms: u32, deadline_ms: u32) -> u32 {
     deadline_ms.saturating_sub(elapsed_ms).div_ceil(1000)
 }
 
-/// Whether a printable key means "boot the selection" (Enter, CR or LF).
-fn is_enter(c: Char16) -> bool {
-    let code: u16 = c.into();
-    code == 0x0D || code == 0x0A
+/// Maps a UEFI keyboard-console key to the menu's logical keys. Digits jump
+/// to an entry by position (`1`-`9`/`0`), Enter/CR/LF boots, Esc disarms the
+/// countdown. Everything else is ignored.
+fn key_from_conin(key: Key) -> Option<MenuKey> {
+    match key {
+        Key::Special(ScanCode::UP) => Some(MenuKey::Up),
+        Key::Special(ScanCode::DOWN) => Some(MenuKey::Down),
+        Key::Special(ScanCode::HOME) => Some(MenuKey::Home),
+        Key::Special(ScanCode::END) => Some(MenuKey::End),
+        Key::Special(ScanCode::PAGE_UP) => Some(MenuKey::PageUp),
+        Key::Special(ScanCode::PAGE_DOWN) => Some(MenuKey::PageDown),
+        Key::Special(ScanCode::ESCAPE) => Some(MenuKey::Esc),
+        Key::Printable(c) => {
+            let code: u16 = c.into();
+            match code {
+                0x0D | 0x0A => Some(MenuKey::Enter),
+                0x31..=0x39 => Some(MenuKey::Jump((code - 0x31) as usize)),
+                0x30 => Some(MenuKey::Jump(9)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }

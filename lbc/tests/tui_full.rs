@@ -439,6 +439,10 @@ impl Tui {
 
     fn quit(mut self) -> ExitStatus {
         self.send(b"q");
+        self.wait_exit()
+    }
+
+    fn wait_exit(mut self) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(6);
         let mut child = match self.child.take() {
             Some(c) => c,
@@ -458,8 +462,7 @@ impl Tui {
     }
 }
 
-// ── frame parsing ───────────────────────────────────────────────────────────
-
+// frame parsing
 /// Reads the selected entry's displayed number (1-based) from the `▶` marker.
 /// The row format is ` {marker} {number} `, e.g. ` ▶  3 `.
 fn sel_label(frame: &str) -> Option<u32> {
@@ -794,6 +797,17 @@ fn full_keymap() {
         format!("…{}", tail(&f, 100))
     );
     tui.preview("r (refresh)");
+
+    // Ctrl+C should also cleanly exit
+    let mut ctrlc = Tui::boot();
+    ctrlc.key(b"\x03");
+    let st = ctrlc.wait_exit();
+    check!(
+        failures,
+        "ctrlc-exit-rc0",
+        st.success(),
+        format!("rc={st:?}")
+    );
 
     // quit
     let st = tui.quit();

@@ -10,13 +10,121 @@ lbc \- Leon Boot Configuration: manage the boot config and boot control
 .B config
 .B get
 .RI [ key ]
-.B | set
+.br
+.B lbc
+.B config
+.B set
 .I key
 .I value
 .br
 .B lbc
+.B config
+.B list
+.br
+.B lbc
+.B config
+.B reset
+.br
+.B lbc
+.B config
+.B path
+.br
+.B lbc
+.B boot
+.B stage
+.RI [ \-\-dest dir ] [ \-\-arch arch ]
+.br
+.B lbc
 .B boot
 .B info
+.br
+.B lbc
+.B boot
+.B once
+.I name
+.br
+.B lbc
+.B boot
+.B upload
+.RI [ \-\-vol path ]
+.br
+.B lbc
+.B default
+.B get
+.br
+.B lbc
+.B default
+.B set
+.I name
+.br
+.B lbc
+.B entries
+.B list
+.br
+.B lbc
+.B entries
+.B get
+.I name
+.br
+.B lbc
+.B entries
+.B count
+.br
+.B lbc
+.B find
+.B esps
+.br
+.B lbc
+.B find
+.B entries
+.I name
+.br
+.B lbc
+.B geometry
+.B show
+.br
+.B lbc
+.B geometry
+.B bgr
+.br
+.B lbc
+.B keymap
+.B show
+.br
+.B lbc
+.B profile
+.B save
+.I profile
+.br
+.B lbc
+.B profile
+.B list
+.br
+.B lbc
+.B profile
+.B load
+.I profile
+.br
+.B lbc
+.B profile
+.B delete
+.I profile
+.br
+.B lbc
+.B status
+.br
+.B lbc
+.B help
+.B all
+.br
+.B lbc
+.B help
+.B tree
+.br
+.B lbc
+.B help
+.B command
+.I name
 .SH DESCRIPTION
 .B lbc
 is the boot-configuration and boot-control companion to the Leon bootloader.
@@ -27,6 +135,11 @@ It reuses the shared host-side discovery and geometry modules from the
 .B lbt
 library; the image builders remain in
 .BR lbt (1).
+.PP
+The `lbc tui` menu mirrors the bootloader's runtime experience by exporting
+live framebuffer + BGRT geometry and discovered boot entries to environment
+variables. It also uses the shared boot config and geometry models so host-side
+staging and menu behavior remain consistent with the UEFI boot path.
 .SH COMMANDS
 .SS tui
 Launch the Leon boot-manager menu: a full-screen, keyboard-driven ratatui app
@@ -85,6 +198,9 @@ and mirrored onto every mounted EFI System Partition as
 .IR \eEFI\eleon\eboot.toml ,
 which is what the bootloader reads at boot.
 .TP
+.B config list
+Print the entire resolved boot configuration.
+.TP
 .B config reset
 Reset the boot config to defaults.
 .TP
@@ -119,8 +235,66 @@ boot-manager menu.
 Mirror the boot config onto a mounted ESP (every detected ESP when
 .IR \-\-vol
 is omitted).
+.SS default
+.TP
+.B default get
+Print the configured default boot entry.
+.TP
+.B default set \fIname\fR
+Set the default boot entry label.
+.SS entries
+.TP
+.B entries list
+List discovered boot entries.
+.TP
+.B entries get \fIname\fR
+Resolve one boot entry label to its path.
+.TP
+.B entries count
+Count discovered boot entries.
+.SS find
+.TP
+.B find esps
+List detected EFI System Partitions.
+.TP
+.B find entries \fIname\fR
+Find boot entries by label.
+.SS geometry
+.TP
+.B geometry show
+Show live framebuffer + BGRT geometry.
+.TP
+.B geometry bgr
+Show BGRT logo geometry.
+.SS keymap
+.TP
+.B keymap show
+Print the boot-manager keymap.
+.SS profile
+.TP
+.B profile save \fIprofile\fR
+Save the current boot config as a named profile.
+.TP
+.B profile list
+List saved boot-config profiles.
+.TP
+.B profile load \fIprofile\fR
+Restore a boot config from a named profile.
+.TP
+.B profile delete \fIprofile\fR
+Delete a saved boot-config profile.
 .SS status
 Print the boot configuration status: path, keys, saved profiles, and ESPs.
+.SS help
+.TP
+.B help all
+Print the full command reference.
+.TP
+.B help tree
+Print the command tree.
+.TP
+.B help command \fIname\fR
+Describe one command.
 .SH FILES
 .TP
 .I ~/.config/leon/boot.toml

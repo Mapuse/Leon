@@ -1,8 +1,11 @@
-.\" Leon Build Tool — Man Page
+.\" Leon Build Tool \- Man Page
 .TH LBT 1 "2026-08-08" "lbt 0.7.0" "User Commands"
 .SH NAME
-lbt \- Leon Build Tool: inspect geometry and boot entries, build ESP/ISO/IMG images
+lbt \- Leon Build Tool: discover boot entries, build ESP/ISO/IMG images, query geometry, control build/keys, and inspect the live machine
 .SH SYNOPSIS
+.B lbt
+.RB [ \-v | \-\-version ]
+.br
 .B lbt
 .B info
 .RI [ dump ]
@@ -10,38 +13,74 @@ lbt \- Leon Build Tool: inspect geometry and boot entries, build ESP/ISO/IMG ima
 .B lbt
 .B discover
 .RI [ \-\-json ]
+.br
+.B lbt
+.BR write " iso | img | esp"
+.RB [ \-\-rootfs " dir ] [ \-\-out " file ] [ \-\-label " name ] [ \-\-size " " MiB ] [ \-\-arch " arch ]"
+.br
+.B lbt
+.BR build " all | boot | kernel | lbt"
+.RB [ \-\-arch " arch ]"
+.br
+.B lbt
+.BR xfer " esp | stage"
+.RB [ \-\-source " dir ] [ \-\-dest " dir ]"
+.br
+.B lbt
+.BR keys " setup | sign | esl | verify"
+.RB [ \-\-keydir " dir ] [ \-\-path " file ] [ \-\-out " file ] [ \-\-cert " pem ]"
+.br
+.B lbt
+.I command
+.RI [ subcommand ]
+.RB [ flags ]
+.br
+See the
+.B COMMANDS
+section below for the full default command tree and the
+.B FLAGS
+section for the shared flag vocabulary.
 .SH DESCRIPTION
 .B lbt
-is the host-side companion to the Leon bootloader. It introspects the live
-machine (block devices, EFI System Partitions, boot entries, framebuffer and
-BGRT logo geometry), and builds bootable ESP/ISO/IMG images.
+is the host-side companion to the Leon bootloader and the 
+.BR lbc (1)
+boot-configuration tool. It introspects the live machine (block devices, EFI
+System Partitions, boot entries, framebuffer and BGRT logo geometry), builds
+bootable ESP/ISO/IMG images using pure-Rust FAT and GPT writers, builds the
+bootloader, kernel, and itself, manages Secure Boot keys, and inspects the
+host environment, filesystems, boot log, and firmware.
+.PP
 Boot configuration and boot control (the boot-manager menu, staging, the boot
 config) moved to the sibling
 .B lbc
-binary — see
+binary \- see
 .BR lbc (1).
+Everything `lbt` needs for discovery, geometry, and imaging is discovered from
+the live system at run time (\fIlsblk\fR and \fI/sys\fR); nothing is assumed or
+invented.
+.PP
+The command line is parsed by a custom, table-driven dispatcher. Every command
+supports short flags, long flags, aliases, and positional arguments freely at
+any depth, and flags may appear before, between, or after subcommand tokens.
+Every short flag character maps to exactly one long flag name, and every long
+flag is consistently either a boolean or a value, so the same vocabulary is
+valid across the whole tree.
 .SH COMMANDS
-.SS info
-Print the current framebuffer and BGRT logo geometry.
-.TP
-.B info \fIdump\
-With a path to a geometry record (\fIbootinfo.json\fR written by the
-bootloader to \eEFI\eleon), print the captured geometry instead of the live one.
-.TP
-.B info
-Without an argument, read live geometry from /sys
-(/sys/class/graphics/fb0 and /sys/firmware/acpi/bgrt). Fails loudly if no live
-framebuffer is available rather than guessing.
+The default build (without the optional
+.B cps
+feature) exposes the following namespaces. Each namespace also has a
+single-letter alias command at the root (see the
+.B ALIASES
+section below).
 .SS discover
-Auto-detect every EFI System Partition and its boot entries.
-Note: In addition to enumerating mounted ESPs, Leon scans common `/boot`
-locations (`/boot`, `/boot/efi`, `/boot/EFI`) recursively for EFI-capable
-files and includes them as candidate boot entries. Detection is strict: `.efi`
-files must validate as PE/COFF (`MZ` + `PE\0\0`) and ELF files must contain the
-`EFI stub` marker in the first 64 KiB to be accepted as an EFI-stub kernel.
+.I lbt discover
+auto-detects every EFI System Partition and its boot entries.
 .TP
 .B discover
-List block devices (name, kind, filesystem, mount point), ESPs, and boot entries.
+List block devices (name, kind, filesystem, mount point), ESPs, and boot
+entries. Detection is strict: `.efi` files must validate as PE/COFF
+(`MZ` + `PE\e0\e0`) and ELF files must contain the `EFI stub` marker in the
+first 64 KiB to be accepted as an EFI-stub kernel.
 .TP
 .B discover \-\-json
 Emit the same information as machine-readable JSON with the keys
@@ -49,28 +88,581 @@ Emit the same information as machine-readable JSON with the keys
 .BR esps ,
 and
 .BR boot_entries .
-.SS images
-Build bootable images from a rootfs: `w iso`, `w img`, `w esp` (or the `I`
-namespace). ESP images place the bootloader at
-.IR \eEFI\eBOOT
-and the EFI-stub kernel at
-.IR \eEFI\eleon\ekernel.efi .
+.PP
+In addition to enumerating mounted ESPs, Leon scans common
+.I /boot
+locations
+.RI ( /boot ,
+.IR /boot/efi ,
+.IR /boot/EFI )
+recursively for EFI-capable files and includes them as candidate boot entries.
+Entries are also read from systemd-boot
+.RI ( EFI/systemd/loader/entries/*.conf
+title lines) and GRUB
+.RI ( grub.cfg
+menuentry lines). The same physical file found under two spellings (e.g. an
+ESP-relative path and an absolute
+.I /boot/efi
+path) is deduplicated so it appears only once, with the ESP-relative form
+winning.
+.SS info
+.I lbt info
+prints the current framebuffer and BGRT logo geometry.
+.TP
+.B info \fIdump\fR
+With a path to a geometry record (\fIbootinfo.json\fR written by the
+bootloader to
+.IR \eEFI\eleon ),
+print the captured geometry instead of the live one.
+.TP
+.B info
+Without an argument, read live geometry from
+.I /sys
+.RI ( /sys/class/graphics/fb0
+and
+.IR /sys/firmware/acpi/bgrt ).
+Fails loudly if no live framebuffer is available rather than guessing.
+.PP
+The geometry is also available through the
+.B geometry
+.
+.BR show " / " geometry " " bgr
+commands and the
+.B json " " info
+and
+.B json " " all
+commands.
+.SS geometry
+.TP
+.B geometry show
+Print the framebuffer + BGRT geometry (same as
+.BR "info" ).
+.TP
+.B geometry bgr
+Print only the BGRT logo geometry.
+.SS write / image
+Build bootable images from a rootfs directory. The ESP image is a
+single-FAT-partition GPT disk written natively (no mtools); the IMG image is a
+GPT disk with a FAT ESP partition plus an ext4 root partition populated
+directly from the rootfs; the ISO image is an El Torito / hybrid ISO. The FAT
+and GPT writers are pure Rust; only the ISO assembly
+.RB ( xorriso
+or
+.RB genisoimage )
+and the ext4 root partition
+.RB ( mkfs.ext4 )
+call host tools.
+.TP
+.B write iso \fR[\fB\-\-rootfs \fIdir\fR] [\fB\-\-out \fIfile\fR] [\fB\-\-label \fIname\fR]
+Build a bootable ISO from a rootfs. The UEFI El Torito boot image is a small
+FAT volume carrying the bootloader from
+.I EFI/BOOT
+(BOOTX64 or BOOTAA64). If neither loader is present, a data-only ISO is built
+with a warning. When
+.B xorriso
+is available the ISO is made hybrid (bootable from USB too) using an
+installed
+.I isohdpfx.bin
+MBR if present; otherwise
+.B genisoimage
+is used as a fallback. Defaults:
+.I leon.iso
+and label
+.IR LEON .
+.TP
+.B write img \fR[\fB\-\-rootfs \fIdir\fR] [\fB\-\-out \fIfile\fR] [\fB\-\-size \fIMiB\fR]
+Build a GPT disk image from a rootfs: a 64 MiB FAT ESP partition at 1 MiB plus
+an ext4 root partition populated directly from the rootfs directory via
+.BR "mkfs.ext4 -d"
+(no mount, no privileges). Defaults:
+.I leon.img
+and size
+.IR 1024 .
+.TP
+.B write esp \fR[\fB\-\-rootfs \fIdir\fR] [\fB\-\-out \fIfile\fR] [\fB\-\-size \fIMiB\fR] [\fB\-\-arch \fIarch\fR]
+Build an ESP (EFI System Partition) disk image: a single-FAT-partition GPT
+disk. When no
+.B \-\-rootfs
+is given, the repo's staged ESP tree
+.I build/esp
+(created by
+.BR "lbc boot stage" )
+is used. Defaults:
+.I leon-esp.img
+and size
+.IR 64 .
+These commands are also reachable as
+.B lbt iso
+(or
+.BR x ),
+.BR "lbt image iso/img/esp"
+(or
+.BR I ),
+and
+.BR "lbt w".
+.SS build / xfer
+.B lbt build
+builds the bootloader, EFI-stub kernel, and the lbt host tool, mirroring the
+Makefile targets in pure Rust.
+.TP
+.B build all \fR[\fB\-\-arch \fIarch\fR]
+Build the bootloader, EFI-stub kernel, and lbt.
+.TP
+.B build boot \fR[\fB\-\-arch \fIarch\fR]
+Build the UEFI bootloader
+.RI ( lbl.efi )
+for the given (or host) architecture.
+.TP
+.B build kernel \fR[\fB\-\-arch \fIarch\fR]
+Build the EFI-stub kernel
+.RI ( lbl-kernel.efi ).
+.TP
+.B build lbt
+Build the lbt host tool (native target).
+.PP
+Supported architectures are
+.B amd64
+.RI ( x86_64-unknown-uefi )
+and
+.B arm64
+.RI ( aarch64-unknown-uefi ).
+.TP
+.B xfer esp \fR[\fB\-\-source \fIdir\fR] [\fB\-\-dest \fIdir\fR]
+Copy the staged ESP tree onto a mounted ESP volume (default source
+.IR build/esp ,
+default dest
+.IR /mnt/esp ).
+.TP
+.B xfer stage \fR[\fB\-\-source \fIdir\fR] [\fB\-\-dest \fIdir\fR]
+Copy a staged tree into a plain directory (default source
+.IR build/esp ,
+default dest
+.IR esp ).
+.SS keys / sign
+.I lbt keys
+manages Secure Boot keys and signatures, wrapping
+.BR openssl " / " sbsign " / " sbverify " / " cert-to-efi-sig-list .
+.TP
+.B keys setup \fR[\fB\-\-keydir \fIdir\fR]
+Generate a PK/KEK/db key set (RSA-2048 X.509, 10 years) under
+.I keys
+by default.
+.TP
+.B keys sign \fR[\fB\-\-keydir \fIdir\fR] \fB\-\-path \fIfile\fR [\fB\-\-out \fIfile\fR]
+Sign an EFI image with the db key (default output
+.IR file.signed ).
+.TP
+.B keys esl \fB\-\-cert \fIpem\fR
+Emit an EFI Signature List
+.RI ( cert.esl )
+for a certificate.
+.TP
+.B keys verify \fB\-\-cert \fIpem\fR \fB\-\-path \fIfile\fR
+Verify an EFI image signature against a certificate.
+.SS env
+.I lbt env
+reports the host environment and prerequisites.
+.TP
+.B env show
+Print the host environment: OS, PATH, SHELL, TERM, USER, host architecture, and
+the availability of every key tool.
+.TP
+.B env check
+Verify host prerequisites. The key tools are
+.IR cargo ,
+.IR rustup ,
+.IR dd ,
+.IR mkfs.ext4 ,
+.IR mformat ,
+.IR mcopy ,
+.IR xorriso ,
+.IR sgdisk ,
+.IR openssl ,
+.IR sbsign ,
+.IR objcopy ,
+and
+.IR qemu-system-x86_64 .
+.TP
+.B env tool \fB\-\-name \fIname\fR
+Locate a host tool on PATH and print its path.
+.SS fs / rootfs
+.I lbt fs
+inspects directories and files; 
+.I lbt rootfs
+inspects root filesystems.
+.TP
+.B fs ls \fR[\fB\-\-path \fIdir\fR]
+List a directory (default current directory).
+.TP
+.B fs info \fR[\fB\-\-path \fIpath\fR]
+Stat a file or directory: kind, size, permissions, inode, modification time.
+.TP
+.B fs tree \fR[\fB\-\-path \fIdir\fR] [\fB\-\-depth \fIn\fR]
+Print a directory tree (default depth 2).
+.TP
+.B rootfs show \fR[\fB\-\-path \fIdir\fR]
+Describe a rootfs: total size, file count, and the presence of the
+boot-critical paths
+.IR EFI/BOOT/BOOTX64.EFI ,
+.IR EFI/BOOT/BOOTAA64.EFI ,
+.IR EFI/leon/kernel.efi ,
+and
+.IR EFI/leon/boot.toml .
+.TP
+.B rootfs check \fR[\fB\-\-path \fIdir\fR]
+Validate a rootfs layout: require a bootloader (BOOTX64 or BOOTAA64) and the
+EFI-stub kernel at
+.IR EFI/leon/kernel.efi .
+.TP
+.B rootfs tree \fR[\fB\-\-path \fIdir\fR] [\fB\-\-depth \fIn\fR]
+Inventory a rootfs (same as
+.BR "fs tree" ).
+.SS log
+.I lbt log
+shows, tails, clears, and searches the Leon boot log. The bootloader appends
+to
+.IR \evar\elogs\eleon\elog.md
+on the boot volume, so by default these commands look at the repo's staged ESP
+tree
+.RI ( build/esp/var/logs/leon/log.md );
+.B \-\-path
+points at a mounted ESP's copy or anywhere else.
+.TP
+.B log show \fR[\fB\-\-path \fIfile\fR]
+Print the whole boot log.
+.TP
+.B log tail \fR[\fB\-\-path \fIfile\fR]
+Tail the boot log (polling), continuing as it grows and handling rotation.
+.TP
+.B log clear \fR[\fB\-\-path \fIfile\fR]
+Truncate the boot log.
+.TP
+.B log find \fB\-\-pattern \fIpattern\fR [\fB\-\-path \fIfile\fR]
+Search the boot log for lines containing the pattern, printing
+.RI file:line: text .
+.SS names
+.I lbt names
+lists and resolves discovered boot entries by label.
+.TP
+.B names list
+List every discovered boot entry label.
+.TP
+.B names get \fB\-\-name \fIname\fR
+Resolve one boot entry label to its on-ESP path.
+.TP
+.B names count
+Count discovered boot entries.
+.SS os
+.I lbt os
+reports host OS information.
+.TP
+.B os release
+Print the OS release description (/etc/os-release).
+.TP
+.B os kernel
+Print the running kernel version (
+.BR uname -r ).
+.TP
+.B os id
+Print the OS pretty name.
+.SS json
+.I lbt json
+emits machine-readable JSON.
+.TP
+.B json info
+Geometry as JSON (width, height, stride, format, logo), the same fields the
+bootloader's
+.I bootinfo.json
+carries.
+.TP
+.B json discover \fR[\fB\-\-json\fR]
+Discovery result as JSON (esps + boot_entries).
+.TP
+.B json all
+Everything (lbt version, framebuffer, logo, esps, boot_entries) as one JSON
+document.
+.SS query
+.I lbt query
+provides query front-ends.
+.TP
+.B query info
+Query geometry (same as
+.BR "info" ).
+.TP
+.B query esps
+Query every ESP volume (same as
+.BR "discover" 's
+ESP section).
+.SS usb
+.I lbt usb
+manages USB / block devices and flashing.
+.TP
+.B usb list
+List USB / block devices.
+.TP
+.B usb flash \fB\-\-device \fI/dev/sdX\fR \fB\-\-path \fIimage.img\fR
+Flash a disk image onto a block device (needs root). The image must be a whole
+number of 512-byte sectors; the device must exist.
+.TP
+.B usb detect
+Detect removable devices (from the sysfs
+.I removable
+attribute).
+.SS firmware
+.I lbt firmware
+describes the firmware.
+.TP
+.B firmware info
+Describe the firmware: UEFI vs BIOS/legacy, DMI vendor and product, and Secure
+Boot state.
+.TP
+.B firmware secureboot
+Report the Secure Boot state (from efivarfs).
+.TP
+.B firmware acpi
+List the ACPI tables the firmware exposed.
+.SS network
+.TP
+.B network check
+Check network reachability with a plain TCP connect (no external tool) to
+.IR 1.1.1.1:443
+and
+.IR 8.8.8.8:443 .
+.SS devices
+.TP
+.B devices list
+List block devices (same as
+.BR "usb list" ).
+.TP
+.B devices esps
+List ESP partitions (same as
+.BR "query esps" ).
+.SS esp
+.TP
+.B esp make \fR[\fB\-\-out \fIfile\fR] [\fB\-\-arch \fIarch\fR]
+Build an ESP image (same as
+.BR "write esp" ).
+.TP
+.B esp check \fR[\fB\-\-path \fIdir\fR]
+Check an ESP volume (same as
+.BR "fs info" ).
+.TP
+.B esp find
+Find ESP volumes (same as
+.BR "query esps" ).
+.SS help
+.TP
+.B help all
+Print the full command reference: every leaf command with its flags.
+.TP
+.B help tree
+Print the command tree as an indented outline.
+.TP
+.B help command \fB\-\-name \fIname\fR
+Describe one command (matched by canonical name or alias).
+.SS alias
+.TP
+.B alias list
+List every command alias declared in the tree.
+.SS version
+.TP
+.B version
+Print the version (
+.BI lbt " " VERSION ).
+Also reachable as
+.BR "lbt -v" " / " "lbt --version" .
+.SH FLAGS
+The following flags are shared across the whole command tree. Each short
+character maps to exactly one long name, and each long name is consistently
+either a boolean or a value.
+.TP
+.B -j, --json
+Boolean. Emit machine-readable JSON.
+.TP
+.B -p, --path \fIpath\fR
+Value. File or directory path.
+.TP
+.B -o, --out \fIfile\fR
+Value. Output file.
+.TP
+.B -r, --rootfs \fIdir\fR
+Value. Root filesystem directory.
+.TP
+.B -n, --name \fIname\fR
+Value. Entry name.
+.TP
+.B -d, --dest \fIdir\fR
+Value. Destination directory.
+.TP
+.B -a, --arch \fIarch\fR
+Value. Architecture:
+.B amd64
+or
+.BR arm64 .
+.TP
+.B -c, --config \fIfile\fR
+Value. Config file path.
+.TP
+.B -k, --keydir \fIdir\fR
+Value. Secure Boot key directory.
+.TP
+.B -l, --label \fIname\fR
+Value. Volume label.
+.TP
+.B -s, --size \fIMiB\fR
+Value. Size in MiB.
+.TP
+.B -D, --depth \fIn\fR
+Value. Traversal depth.
+.TP
+.B -f, --pattern \fIpattern\fR
+Value. Search pattern.
+.TP
+.B -e, --device \fIpath\fR
+Value. Block device path.
+.TP
+.B -g, --source \fIdir\fR
+Value. Source path.
+.TP
+.B -x, --display \fIname\fR
+Value. Display name.
+.TP
+.B -y, --desc \fItext\fR
+Value. Description.
+.TP
+.B -F, --func \fIfunc\fR
+Value. Plugin hook function.
+.TP
+.B -A, --aliases \fIlist\fR
+Value. Comma-separated aliases.
+.TP
+.B -K, --key \fIkey\fR
+Value. Config key.
+.TP
+.B -V, --value \fIvalue\fR
+Value. Config value.
+.TP
+.B -C, --cert \fIpem\fR
+Value. Certificate PEM path.
+.PP
+Additionally
+.B -v
+/
+.BR --version
+/
+.B -V
+prints the version (intercepted at the root), and
+.B -h
+/
+.B --help
+prints help for the node reached.
+.SH ALIASES
+Every namespace and command also has a compact single-letter spelling at the
+root, plus several per-command aliases. The full set is printed by
+.BR "lbt alias list" .
+In particular:
+.TP
+a/A
+Alias reports
+.TP
+d
+discover
+.TP
+e
+env
+.TP
+f
+fs
+.TP
+g/G
+geometry
+.TP
+h/H
+help
+.TP
+i
+info
+.TP
+j/J
+json
+.TP
+l/L
+log
+.TP
+n
+names
+.TP
+o/O
+os
+.TP
+q/Q
+query
+.TP
+r/R
+rootfs
+.TP
+u/U
+usb
+.TP
+v/V
+version
+.TP
+w/W/I
+write / image
+.TP
+x/X
+iso / xfer
+.TP
+z/Z/F
+firmware
+.TP
+B/M
+build
+.TP
+D
+devices
+.TP
+E
+esp
+.TP
+K/S
+keys
+.TP
+N
+network
 .SH FILES
 .TP
-.I ~/.config/leon/boot.toml
-Host copy of the boot configuration (timeout, default_entry, theme, splash,
-entries_file), managed by
-.BR "lbc config" .
+.I build/esp
+The repo's staged ESP tree, used as the default source for
+.B write esp
+and
+.BR "xfer esp" ,
+and as the default location of the boot log.
 .TP
 .I \eEFI\eleon\ebootinfo.json
 Geometry + resolved config record written by the bootloader at boot time;
 consumed by
-.BR "lbt info" .
+.BR "lbt info"
+(as an explicit dump path) and mirrored by
+.BR "lbt json info" .
 .TP
 .I \eEFI\eleon\eentries.jsonc
-Boot entries discovered and written by the bootloader at every boot; consumed
-by
-.BR lbt " discover" .
+Boot entries discovered and written by the bootloader at every boot; the
+source of entries for
+.BR "lbt discover" .
+.TP
+.I \evar\elogs\eleon\elog.md
+The unified boot log (Markdown, capped at 64 KiB) written by the bootloader;
+read by
+.BR "lbt log" .
+.PP
+The boot configuration itself (
+.IR ~/.config/leon/boot.toml ,
+.IR \eEFI\eleon\eboot.toml )
+is managed and consumed by
+.BR lbc (1),
+not by
+.BR lbt .
 .SH SEE ALSO
 .BR lbl (1),
 .BR lbc (1),
