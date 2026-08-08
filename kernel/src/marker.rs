@@ -6,12 +6,15 @@
 use leon_common::{Bgrt, Framebuffer, PixelFormat};
 
 /// Draws a handoff sanity marker on the untouched frame buffer.
-pub fn take_over(fb: &Framebuffer, bgrt: Option<Bgrt>) {
+///
+/// `panel` is the band the status panel occupies (see [`console::show_status`]);
+/// the marker picks a corner clear of both the logo and that band.
+pub fn take_over(fb: &Framebuffer, bgrt: Option<Bgrt>, panel: Option<(u32, u32)>) {
     if fb.base == 0 || !matches!(fb.format, PixelFormat::Rgbx | PixelFormat::Bgrx) {
         return;
     }
     let size = 16u32;
-    let (x, y) = free_corner(fb, bgrt, size);
+    let (x, y) = free_corner(fb, bgrt, panel, size);
     for dy in 0..size {
         for dx in 0..size {
             write_pixel(fb, x + dx, y + dy, 0x2e, 0xcc, 0x71);
@@ -19,18 +22,38 @@ pub fn take_over(fb: &Framebuffer, bgrt: Option<Bgrt>) {
     }
 }
 
-/// Picks a screen corner for the marker that does not overlap the logo.
-fn free_corner(fb: &Framebuffer, bgrt: Option<Bgrt>, size: u32) -> (u32, u32) {
-    let fallback = (0, fb.height.saturating_sub(size));
-    let candidates = [fallback, (fb.width.saturating_sub(size), 0)];
-    match candidates
+/// Picks a screen corner for the marker that does not overlap the logo or the
+/// panel band, preferring the top corners (the firmware banner is on the left).
+fn free_corner(
+    fb: &Framebuffer,
+    bgrt: Option<Bgrt>,
+    panel: Option<(u32, u32)>,
+    size: u32,
+) -> (u32, u32) {
+    let w = fb.width;
+    let h = fb.height;
+    let corners = [
+        (w.saturating_sub(size), 0),
+        (0, 0),
+        (w.saturating_sub(size), h.saturating_sub(size)),
+        (0, h.saturating_sub(size)),
+    ];
+    corners
         .iter()
         .copied()
-        .find(|(x, y)| !overlaps_logo(bgrt, *x, *y, size))
-    {
-        Some(corner) => corner,
-        None => fallback,
-    }
+        .find(|(x, y)| !overlaps_logo(bgrt, *x, *y, size) && !in_panel(panel, *x, *y, size))
+        .unwrap_or((0, h.saturating_sub(size)))
+}
+
+/// True if the square at `(x, y)` overlaps the panel band (which spans the
+/// full width, so only the vertical range matters).
+fn in_panel(panel: Option<(u32, u32)>, _x: u32, y: u32, size: u32) -> bool {
+    let (py, ph) = match panel {
+        Some(band) => band,
+        None => return false,
+    };
+    let (ay0, ay1) = (y as i64, y as i64 + size as i64);
+    ay0 < py as i64 + ph as i64 && ay1 > py as i64
 }
 
 /// True if the square at `(x, y)` with the given size intersects the logo box.

@@ -11,19 +11,20 @@
 //! * It exits boot services, structurally validates the memory map it now
 //!   owns, and draws a sanity marker into a corner of the untouched frame
 //!   buffer that can never overlap the logo.
-//! * It then parks, ready to be replaced by the real kernel/init system.
+//! * It reports the handoff on the raw serial console and in a status panel
+//!   at the edge of the frame buffer, then parks, ready to be replaced by the
+//!   real kernel/init system.
 //!
 //! The crate is organized into subfolders: GOP capture in [`gop`], BGRT
-//! discovery in [`bgrt`], memory-map validation in [`memmap`], and the handoff
-//! marker in [`marker`]. The GOP/BGRT discovery mirrors `lbl`'s own finders
-//! (`src/firmware/`), which it cannot import: the loader uses the UEFI image
-//! file system while this stub is a UEFI application. Both stay deliberately
-//! read-only about the screen.
+//! discovery in [`bgrt`], memory-map validation in [`memmap`], the serial
+//! console in [`serial`], and the frame-buffer status panel in [`console`].
+//! The GOP/BGRT discovery mirrors `lbl`'s own finders (`src/firmware/`),
+//! which it cannot import: the loader uses the UEFI image file system while
+//! this stub is a UEFI application. Both stay deliberately read-only about
+//! the screen until the handoff.
 
 #![no_std]
 #![no_main]
-
-extern crate alloc;
 
 use core::arch::asm;
 
@@ -32,9 +33,11 @@ use uefi::prelude::*;
 use uefi::Status;
 
 mod bgrt;
+mod console;
 mod gop;
 mod marker;
 mod memmap;
+mod serial;
 
 /// UEFI application entry point. `lbl` chainloads this exactly like any other
 /// boot entry: `LoadImage` + `StartImage` with a device path. The stub talks to
@@ -53,10 +56,66 @@ fn efi_main() -> Status {
     // sitting in the frame buffer at this exact millisecond.
     let map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
 
-    let _valid = memmap::validate_map(&map);
+    let map_ok = memmap::validate_map(&map);
     mask_interrupts();
-    marker::take_over(&framebuffer, bgrt);
+
+    // The handoff is now complete: everything from here on is the kernel.
+    // Report the handoff on the raw serial console (no firmware services left)
+    // and draw a status panel into a corner of the untouched frame buffer.
+    let mut logo = [0u8; 64];
+    let logo = logo_text(&mut logo, bgrt);
+    let mut status = [0u8; 200];
+    let status = console::fmt_buf(
+        &mut status,
+        format_args!(
+            "memmap {} - fb {}x{} {} - logo {}",
+            if map_ok { "OK" } else { "FAIL" },
+            framebuffer.width,
+            framebuffer.height,
+            format_name(framebuffer.format),
+            logo,
+        ),
+    );
+    let mut banner = [0u8; 120];
+    let banner = console::fmt_buf(
+        &mut banner,
+        format_args!(
+            "Leon kernel: handoff {} - {}",
+            if map_ok { "OK" } else { "FAIL" },
+            status,
+        ),
+    );
+    serial::log(format_args!("{}", banner));
+    let panel = console::show_status(&framebuffer, bgrt, "Leon kernel - handoff complete", status, map_ok);
+    marker::take_over(&framebuffer, bgrt, panel);
     halt()
+}
+
+/// Textual description of the BGRT logo, if one is present.
+fn logo_text(buf: &mut [u8], bgrt: Option<leon_common::Bgrt>) -> &str {
+    match bgrt {
+        Some(bgrt) => console::fmt_buf(
+            buf,
+            format_args!(
+                "{}x{} @ {},{}",
+                bgrt.image_width,
+                bgrt.image_height,
+                bgrt.offset_x,
+                bgrt.offset_y
+            ),
+        ),
+        None => "none",
+    }
+}
+
+/// Human-readable name of a pixel format.
+fn format_name(format: leon_common::PixelFormat) -> &'static str {
+    match format {
+        leon_common::PixelFormat::Rgbx => "Rgbx",
+        leon_common::PixelFormat::Bgrx => "Bgrx",
+        leon_common::PixelFormat::Bitmask => "Bitmask",
+        leon_common::PixelFormat::BltOnly => "BltOnly",
+    }
 }
 
 /// Masks all maskable interrupts on this architecture. On x86_64 that is

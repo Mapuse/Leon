@@ -45,27 +45,45 @@ pub fn run() -> Result<()> {
     // Persist the real boot geometry for host tooling (`lbt`). Best-effort.
     crate::record::write(&framebuffer, bgrt, &boot_config);
 
+    // Report the Secure Boot state: when it is on, an unsigned entry is
+    // rejected by the firmware at `LoadImage` time, so warn up front (both on
+    // the menu, if shown, and in the boot log).
+    let secure_boot = crate::secure_boot::state();
+    if let Some(warn) = crate::secure_boot::warning(secure_boot) {
+        crate::log_error!("boot: {warn}");
+    }
+
     #[cfg(feature = "gop-ui")]
     {
         use uefi::proto::console::text::Output;
         use uefi::system;
 
-        if let Ok(mut renderer) = GopRenderer::capture() {
-            renderer.fill_rect(0, 0, renderer.width, renderer.height, 0x002b2b2b);
+        // Scaffold only: overlay placeholder text without clearing the frame
+        // buffer. The framebuffer must never be filled here — the firmware
+        // logo is still on screen and the flicker-free guarantee forbids
+        // destroying it (that is also why `set_mode` is never called).
+        if let Ok(_renderer) = GopRenderer::capture() {
             if let Ok(Some(mut stdout)) = system::with_stdout(|out| Ok(out.clone())) {
                 GopRenderer::console_text(&mut stdout, 1, 1, "Leon UEFI GOP UI placeholder");
-                GopRenderer::console_text(&mut stdout, 1, 2, "Press Enter to continue to the text menu");
+                GopRenderer::console_text(
+                    &mut stdout,
+                    1,
+                    2,
+                    "Press Enter to continue to the text menu",
+                );
                 let _ = stdout.set_cursor_position(0, 4);
             }
         }
     }
     // A `ui::GopRenderer` scaffold exists in `src/ui` and may be used to port
-    // the host npyscreen-like layout into the bootloader in future work.
+    // the host boot-manager menu layout into the bootloader in future work. It
+    // must keep the "query, don't touch" rule: never `set_mode`, never fill
+    // the whole frame buffer, so the firmware logo survives every handoff.
 
     // Pick the entry to boot: the menu choice if the splash menu was shown,
     // otherwise `default_entry`, otherwise the first discovery.
     let chosen = if boot_config.splash == Some(true) {
-        menu::run(&boot_config, &entries)
+        menu::run(&boot_config, &entries, secure_boot)
     } else {
         boot_config
             .default_entry

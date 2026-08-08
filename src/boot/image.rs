@@ -16,20 +16,39 @@ use uefi::proto::device_path::{DevicePath, DeviceSubType, DeviceType};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::{Result, Status};
 
-use super::entries::Entry;
+use super::entries::{self, Entry};
 
 /// Loads and starts the entry. On success this only returns if the image
 /// itself returned (e.g. it chose not to hand off), never if it took over.
 pub fn boot(entry: &Entry) -> Result {
     let path = BootDevicePath::build(&entry.path)?;
-    let image = boot::load_image(
+    match boot::load_image(
         image_handle(),
         LoadImageSource::FromDevicePath {
             device_path: path.as_path(),
             boot_policy: BootPolicy::BootSelection,
         },
-    )?;
-    boot::start_image(image)?;
+    ) {
+        Ok(image) => boot::start_image(image)?,
+        Err(err) => {
+            // The most actionable failure: the firmware's image verification
+            // rejected the entry because Secure Boot is on and it is unsigned
+            // or not enrolled. Firmware reports this as either
+            // SECURITY_VIOLATION (spec) or ACCESS_DENIED (OVMF/EDK2).
+            let rejected_by_sb = matches!(
+                err.status(),
+                Status::SECURITY_VIOLATION | Status::ACCESS_DENIED
+            ) && crate::secure_boot::state()
+                == crate::secure_boot::SecureBootState::Enabled;
+            if rejected_by_sb {
+                crate::log_error!(
+                    "boot: {} rejected by Secure Boot - sign it or enroll its key",
+                    entries::cstr_lossy(entry.path.as_ref())
+                );
+            }
+            return Err(err);
+        }
+    }
     Ok(())
 }
 

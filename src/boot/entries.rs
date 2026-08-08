@@ -6,6 +6,10 @@
 //! special, it lives at `\EFI\leon\kernel.efi` and is chainloaded exactly like
 //! any other entry with `LoadImage`/`StartImage`.
 //!
+//! Discovery is recursive (vendor subdirectories are scanned too, matching
+//! `lbt discover`), and labels are file stems (`kernel`, `shimx64`, ...) so a
+//! `default_entry` written by `lbt config set` always matches at boot.
+//!
 //! The discovered entries are written to a JSONC file on the boot volume
 //! (configurable via the `entries_file` boot config key, default
 //! `\EFI\leon\entries.jsonc`) so host tooling (`lbt list`) sees exactly what a
@@ -30,6 +34,10 @@ const BOOT_DIR: &CStr16 = cstr16!("BOOT");
 const DEFAULT_ENTRIES_FILE: &CStr16 = cstr16!(r"\EFI\leon\entries.jsonc");
 /// Directory that always holds the entries file, so it can be created up front.
 const LEON_DIR: &CStr16 = cstr16!(r"\EFI\leon");
+/// Hard cap on directory depth during discovery. ESP trees are flat or one
+/// level deep; this bounds recursion on pathological layouts (e.g. self
+/// links), which some FAT implementations expose as `\EFI\EFI\...`.
+const MAX_DEPTH: usize = 8;
 
 /// One boot entry: a UEFI application on the ESP.
 pub struct Entry {
@@ -39,43 +47,95 @@ pub struct Entry {
     pub path: CString16,
 }
 
-/// Discovers every `*.efi` under `\EFI\<vendor>\`, in directory-then-name
-/// order. The firmware fallback directory is skipped so the loader itself
-/// never shows up as a boot entry.
+/// Discovers every `*.efi` under `\EFI\<vendor>\`, recursively, in
+/// directory-then-name order. The firmware fallback directory is skipped so
+/// the loader itself never shows up as a boot entry. Entry labels are the
+/// file name without its `.efi` extension, matching what host tooling (`lbt`)
+/// reports — so `default_entry` written by `lbt config set` matches here.
 pub fn discover(fs: &mut FileSystem) -> Vec<Entry> {
     let mut entries = Vec::new();
     let Ok(iter) = fs.read_dir(Path::new(EFI_ROOT)) else {
         return entries;
     };
     for item in iter.flatten() {
-        if !item.is_directory() {
+        let name = trim_fat_padding(item.file_name());
+        let name = name.as_ref();
+        if is_self_or_parent(name) || !item.is_directory() {
             continue;
         }
-        let vendor = item.file_name();
-        if eq_ignore_ascii_case(vendor, BOOT_DIR) {
+        if eq_ignore_ascii_case(name, BOOT_DIR) {
             continue;
         }
-        let Some(dir_path) = join_path(EFI_ROOT, vendor) else {
+        let Some(dir_path) = join_path(EFI_ROOT, name) else {
             continue;
         };
-        let Ok(sub) = fs.read_dir(Path::new(dir_path.as_ref())) else {
+        collect_dir(fs, dir_path.as_ref(), 1, &mut entries);
+    }
+    entries
+}
+
+/// Recursively collects every `*.efi` file under `dir` as a boot entry,
+/// mirroring the host tool's recursive ESP scan (`lbt discover`).
+fn collect_dir(fs: &mut FileSystem, dir: &CStr16, depth: usize, out: &mut Vec<Entry>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(iter) = fs.read_dir(Path::new(dir)) else {
+        return;
+    };
+    for item in iter.flatten() {
+        let name = trim_fat_padding(item.file_name());
+        let name = name.as_ref();
+        if is_self_or_parent(name) {
             continue;
-        };
-        for file in sub.flatten() {
-            if !file.is_regular_file() || !ends_with_efi(file.file_name()) {
-                continue;
-            }
-            let name = file.file_name();
-            let Some(full) = join_path(&dir_path, name) else {
+        }
+        if item.is_directory() {
+            let Some(sub) = join_path(dir, name) else {
                 continue;
             };
-            entries.push(Entry {
-                label: CString16::from(name),
+            collect_dir(fs, sub.as_ref(), depth + 1, out);
+        } else if item.is_regular_file() && ends_with_efi(name) {
+            let Some(full) = join_path(dir, name) else {
+                continue;
+            };
+            out.push(Entry {
+                label: without_efi(name),
                 path: full,
             });
         }
     }
-    entries
+}
+
+/// Whether a directory entry is the `.` or `..` self/parent link. The FAT
+/// filesystem pads short (8.3) names to a fixed width with trailing spaces and
+/// the firmware hands those back verbatim, so this checks the padded form.
+fn is_self_or_parent(name: &CStr16) -> bool {
+    let slice = name.to_u16_slice();
+    slice == [b'.' as u16] || slice == [b'.' as u16, b'.' as u16]
+}
+
+/// FAT pads short (8.3) directory entry names to a fixed width with trailing
+/// spaces; the firmware returns them verbatim. Strip the padding so names
+/// compare and join cleanly. Long (LFN) names are never padded.
+fn trim_fat_padding(name: &CStr16) -> CString16 {
+    let mut end = name.to_u16_slice().len();
+    let slice = name.to_u16_slice();
+    while end > 0 && slice[end - 1] == b' ' as u16 {
+        end -= 1;
+    }
+    let mut v: Vec<u16> = slice[..end].to_vec();
+    v.push(0);
+    CString16::try_from(v).unwrap_or_else(|_| CString16::from(name))
+}
+
+/// The file name without the trailing `.efi` extension (any case), so labels
+/// read `kernel`, `shimx64`, `BOOTX64` — the same stems `lbt` reports.
+fn without_efi(name: &CStr16) -> CString16 {
+    let slice = name.to_u16_slice();
+    let keep = slice.len().saturating_sub(EFI_SUFFIX.len());
+    let mut v: Vec<u16> = slice[..keep].to_vec();
+    v.push(0);
+    CString16::try_from(v).unwrap_or_else(|_| CString16::from(name))
 }
 
 /// Writes the discovered entries to the configured JSONC file on the boot
@@ -105,7 +165,7 @@ fn entries_path(cfg: &BootConfig) -> Option<CString16> {
 /// // Auto-generated by lbl on every boot. Do not edit.
 /// {
 ///   "entries": [
-///     { "label": "kernel.efi", "path": "\\EFI\\leon\\kernel.efi" }
+///     { "label": "kernel", "path": "\\EFI\\leon\\kernel.efi" }
 ///   ]
 /// }
 /// ```
@@ -163,16 +223,25 @@ pub fn eq_ignore_ascii_case(a: &CStr16, b: &CStr16) -> bool {
             .all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
 }
 
-/// Whether a UEFI file name ends in `.efi` (any case).
+/// Whether a UEFI file name ends in `.efi` (any case). FAT-padded short names
+/// (e.g. `GRUB.EFI   `) are accepted; only long names and non-EFI files match.
 pub fn ends_with_efi(name: &CStr16) -> bool {
-    const SUFFIX: [u16; 4] = [b'.' as u16, b'e' as u16, b'f' as u16, b'i' as u16];
-    let name = name.to_u16_slice();
-    name.len() >= SUFFIX.len()
-        && name[name.len() - SUFFIX.len()..]
+    let slice = name.to_u16_slice();
+    let mut end = slice.len();
+    while end > 0 && slice[end - 1] == b' ' as u16 {
+        end -= 1;
+    }
+    let name = &slice[..end];
+    name.len() >= EFI_SUFFIX.len()
+        && name[name.len() - EFI_SUFFIX.len()..]
             .iter()
-            .zip(SUFFIX)
+            .zip(EFI_SUFFIX)
             .all(|(x, y)| ascii_lower(*x) == y)
 }
+
+/// The `.efi` extension, lowercased, used by both `ends_with_efi` and
+/// `without_efi`.
+const EFI_SUFFIX: [u16; 4] = [b'.' as u16, b'e' as u16, b'f' as u16, b'i' as u16];
 
 /// Lowercases an ASCII code unit; leaves everything else unchanged.
 fn ascii_lower(c: u16) -> u16 {

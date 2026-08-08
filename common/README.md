@@ -64,9 +64,8 @@ Unknown keys are ignored so the bootloader tolerates forward-compatible files.
 
 Every boot, the loader writes the live geometry + resolved config as JSON on
 the boot volume at `\EFI\leon\bootinfo.json` (best-effort; the boot proceeds
-even if the write fails). Host tools such as `lbt` read this file to
-author/preview splash themes against *exactly* what this machine's firmware
-provided:
+even if the write fails). Host tools such as `lbt` read this file to mirror
+*exactly* what this machine's firmware provided:
 
 ```json
 {

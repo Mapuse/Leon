@@ -3,9 +3,8 @@
 //! Every boot, the loader serialises the live GOP frame buffer geometry, the
 //! firmware BGRT logo metadata, and the resolved boot configuration as JSON on
 //! the boot volume at `\EFI\leon\bootinfo.json`. Host tools (`lbt`) read this
-//! file so they author/preview splash themes against *exactly* what the
-//! firmware on this machine provided, instead of any assumed resolution or
-//! logo.
+//! file so they mirror *exactly* what the firmware on this machine provided,
+//! instead of any assumed resolution or logo.
 //!
 //! This is a pure record of the *query* — nothing is handed to the kernel
 //! anymore. The kernel is an EFI-stub UEFI application that queries GOP and

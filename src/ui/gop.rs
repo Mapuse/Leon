@@ -5,12 +5,12 @@
 //! the host TUI's layout and widgets into the UEFI bootloader.
 
 use core::slice;
+use leon_common::PixelFormat;
+use uefi::Result;
+use uefi::Status;
 use uefi::boot;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat as GopPixelFormat};
 use uefi::proto::console::text::Output as TextOut;
-use uefi::Result;
-use uefi::Status;
-use leon_common::PixelFormat;
 
 pub struct GopRenderer {
     base: *mut u8,

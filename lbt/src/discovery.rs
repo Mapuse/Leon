@@ -5,8 +5,8 @@
 //! device (`lsblk`) and matching the FAT filesystem or the standard GPT ESP
 //! GUID; boot entries are read from *every* mounted ESP's real `EFI` tree.
 
-use std::io::Seek;
 use std::collections::HashSet;
+use std::io::Seek;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -104,7 +104,7 @@ pub fn discover_esp_volumes() -> Result<Vec<EspVolume>> {
 /// Discovers boot entries on every mounted ESP: every `.efi` file in the real
 /// `EFI` tree, plus systemd-boot and GRUB menu entries.
 pub fn discover_boot_entries(esps: &[EspVolume]) -> Result<Vec<BootEntry>> {
-    let mut set = HashSet::new();
+    let mut esp_set = HashSet::new();
     for esp in esps {
         let Some(mp) = &esp.mountpoint else {
             continue;
@@ -113,17 +113,69 @@ pub fn discover_boot_entries(esps: &[EspVolume]) -> Result<Vec<BootEntry>> {
         if !efi.is_dir() {
             continue;
         }
-        collect_efi_files(&efi, &efi, &mut set);
-        collect_systemd_boot(mp, &mut set);
-        collect_grub(mp, &efi, &mut set);
+        collect_efi_files(&efi, &efi, &mut esp_set);
+        collect_systemd_boot(mp, &mut esp_set);
+        collect_grub(mp, &efi, &mut esp_set);
     }
     // Also scan common /boot locations for EFI-stub kernels or standalone
     // EFI binaries that aren't on a mounted ESP. This helps detect OS kernels
-    // that were installed to /boot (non-ESP) but are EFI-capable.
-    collect_boot_dir(&mut set);
-    let mut entries: Vec<BootEntry> = set.into_iter().collect();
+    // that were installed to /boot (non-ESP) but are EFI-capable. When a file
+    // was already found on a mounted ESP (e.g. /boot/efi/EFI/... from the ESP
+    // scan vs /boot/efi/... from the /boot scan) the ESP-relative form wins;
+    // dedup by canonical path so the same physical file never appears twice.
+    let mut boot_set = HashSet::new();
+    collect_boot_dir(&mut boot_set);
+    Ok(merge_entries(esps, esp_set, boot_set))
+}
+
+/// Merges ESP-scan and /boot-scan entries, deduplicating by (label, canonical
+/// path) so the same physical file reported under two spellings never appears
+/// twice (the ESP-relative form wins). Distinct entries that share a file but
+/// not a label — e.g. several GRUB `menuentry`s in one `grub.cfg` — are kept.
+fn merge_entries(
+    esps: &[EspVolume],
+    esp_set: HashSet<BootEntry>,
+    boot_set: HashSet<BootEntry>,
+) -> Vec<BootEntry> {
+    let mut entries: Vec<BootEntry> = Vec::new();
+    let mut seen: HashSet<(String, std::path::PathBuf)> = HashSet::new();
+    for e in esp_set {
+        if seen.insert((e.label.clone(), esp_file_key(esps, &e))) {
+            entries.push(e);
+        }
+    }
+    for e in boot_set {
+        let key = (
+            e.label.clone(),
+            real_path(Path::new(&e.path)).unwrap_or_else(|| std::path::PathBuf::from(&e.path)),
+        );
+        if seen.insert(key) {
+            entries.push(e);
+        }
+    }
     entries.sort_by_key(|e| e.label.clone());
-    Ok(entries)
+    entries
+}
+
+/// The canonical path of an ESP-scan entry. ESP entries use paths relative to
+/// the ESP mountpoint (e.g. `EFI/BOOT/BOOTX64.EFI`), so they are resolved
+/// against each mounted ESP before canonicalizing.
+fn esp_file_key(esps: &[EspVolume], e: &BootEntry) -> std::path::PathBuf {
+    for esp in esps {
+        if let Some(mp) = &esp.mountpoint
+            && let Ok(c) = std::fs::canonicalize(mp.join(&e.path))
+        {
+            return c;
+        }
+    }
+    real_path(Path::new(&e.path)).unwrap_or_else(|| std::path::PathBuf::from(&e.path))
+}
+
+/// Resolves `path` to a canonical, symlink-free form so two spellings of the
+/// same file (e.g. `EFI/BOOT/BOOTX64.EFI` on a mounted ESP and the absolute
+/// `/boot/efi/EFI/BOOT/BOOTX64.EFI`) compare equal.
+fn real_path(path: &Path) -> Option<std::path::PathBuf> {
+    std::fs::canonicalize(path).ok()
 }
 
 /// Scan common /boot paths for EFI-capable files and add them as entries.
@@ -136,34 +188,51 @@ fn collect_boot_dir(out: &mut HashSet<BootEntry>) {
 /// Scan configured paths for EFI-capable files and add them as entries.
 fn collect_boot_dir_paths(paths: &[&Path], out: &mut HashSet<BootEntry>) {
     for dir in paths {
-        if !dir.exists() || !dir.is_dir() {
+        walk_boot_dir(dir, out);
+    }
+}
+
+/// Recursively scans `dir` (skipping symlinks) for EFI-capable files.
+fn walk_boot_dir(dir: &Path, out: &mut HashSet<BootEntry>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let Ok(ft) = ent.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
             continue;
         }
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for ent in rd.flatten() {
-                let path = ent.path();
-                if let Ok(ft) = ent.file_type()
-                    && ft.is_file() {
-                        // Fast accept: .efi files
-                        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("efi")) {
-                            if let Some(stem) = path.file_stem() {
-                                let label = stem.to_string_lossy().to_string();
-                                out.insert(BootEntry { label, path: path.to_string_lossy().to_string() });
-                            }
-                            continue;
-                        }
-                        // Accept ELF files only if they appear to be an
-                        // EFI-stub kernel — search for the ASCII marker "efi stub"
-                        // in the first 64 KiB of the file (case-insensitive).
-                        if (is_elf_efi_stub(&path) || (path.extension().is_some_and(|e| e.eq_ignore_ascii_case("efi")) && is_pe_executable(&path)))
-                            && let Some(stem) = path.file_name() {
-                                let label = stem.to_string_lossy().to_string();
-                                out.insert(BootEntry { label, path: path.to_string_lossy().to_string() });
-                            }
-                    }
-            }
+        let path = ent.path();
+        if path.is_dir() {
+            walk_boot_dir(&path, out);
+            continue;
+        }
+        if let Some(label) = boot_label(&path) {
+            out.insert(BootEntry {
+                label,
+                path: path.to_string_lossy().to_string(),
+            });
         }
     }
+}
+
+/// The label to show for `path`, if it is an EFI-capable file: `.efi` files
+/// must validate as PE/COFF (`MZ` + `PE\0\0`); other files only if they look
+/// like an EFI-stub kernel (ELF with the ASCII marker "efi stub" in the first
+/// 64 KiB).
+fn boot_label(path: &Path) -> Option<String> {
+    let is_efi = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("efi"));
+    if (is_efi && is_pe_executable(path)) || is_elf_efi_stub(path) {
+        return path
+            .file_stem()
+            .or_else(|| path.file_name())
+            .map(|s| s.to_string_lossy().to_string());
+    }
+    None
 }
 
 fn is_elf_efi_stub(path: &Path) -> bool {
@@ -480,6 +549,42 @@ mod tests {
         assert!(labels.contains(&"Ubuntu"));
         assert!(labels.contains(&"Cudane Linux"));
         assert!(!labels.contains(&"BOOTX64.jpg"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn merge_dedups_esp_and_boot_scan_entries() {
+        let dir = std::env::temp_dir().join("lbt_merge_test");
+        std::fs::create_dir_all(dir.join("EFI/BOOT")).unwrap();
+        let pe_path = dir.join("EFI/BOOT/BOOTX64.EFI");
+        std::fs::write(&pe_path, b"MZ\x00\x00").unwrap();
+
+        let esps = [EspVolume {
+            path: "/dev/test".to_string(),
+            mountpoint: Some(dir.clone()),
+            label: None,
+            uuid: None,
+        }];
+
+        // The ESP scan reports a relative path; the /boot scan reports the
+        // absolute path to the *same* physical file (e.g. when /boot/efi is a
+        // mounted ESP). Both must collapse to a single entry.
+        let mut esp_set = HashSet::new();
+        esp_set.insert(BootEntry {
+            label: "BOOTX64".to_string(),
+            path: "EFI/BOOT/BOOTX64.EFI".to_string(),
+        });
+        let mut boot_set = HashSet::new();
+        boot_set.insert(BootEntry {
+            label: "BOOTX64".to_string(),
+            path: pe_path.to_string_lossy().to_string(),
+        });
+
+        let entries = merge_entries(&esps, esp_set, boot_set);
+        assert_eq!(entries.len(), 1, "same file must appear once: {entries:?}");
+        assert_eq!(entries[0].path, "EFI/BOOT/BOOTX64.EFI");
+        assert!(entries[0].path.starts_with("EFI/"), "ESP form wins");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

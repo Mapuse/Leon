@@ -23,6 +23,8 @@
 
 use core::time::Duration;
 
+use alloc::vec::Vec;
+
 use uefi::boot;
 use uefi::cstr16;
 use uefi::proto::console::text::{Color, Key, Output, ScanCode};
@@ -30,6 +32,8 @@ use uefi::system;
 use uefi::{CStr16, CString16, Char16};
 
 use leon_common::boot_config::BootConfig;
+
+use crate::secure_boot::{self, SecureBootState};
 
 use super::entries::{Entry, cstr_lossy, push_u32};
 
@@ -85,19 +89,24 @@ struct Layout {
     entry_rows: usize,
     /// Row of the status line.
     status_row: usize,
+    /// Row of the optional Secure Boot warning, between the status line and the
+    /// bottom border.
+    warn_row: Option<usize>,
     /// Row of the bottom border.
     bottom: usize,
 }
 
 impl Layout {
-    fn new(cols: usize, rows: usize, entries: usize) -> Self {
+    fn new(cols: usize, rows: usize, entries: usize, warn: bool) -> Self {
         let cols = cols.max(8);
         let rows = rows.max(6);
         let margin = if cols >= 24 { 2 } else { 0 };
         let frame_w = (cols - 2 * margin).max(8);
         let content_w = frame_w - 2;
-        let entry_rows = entries.min(rows.saturating_sub(6).max(1));
-        let top = rows.saturating_sub(entry_rows + 6) / 2;
+        let room = rows.saturating_sub(if warn { 7 } else { 6 });
+        let entry_rows = entries.min(room.max(1));
+        let top = rows.saturating_sub(entry_rows + if warn { 7 } else { 6 }) / 2;
+        let warn_row = warn.then_some(top + 3 + entry_rows + 2);
         Self {
             cols,
             rows,
@@ -109,18 +118,23 @@ impl Layout {
             first_entry_row: top + 3,
             entry_rows,
             status_row: top + 3 + entry_rows + 1,
-            bottom: top + 3 + entry_rows + 2,
+            warn_row,
+            bottom: top + 3 + entry_rows + if warn { 3 } else { 2 },
         }
     }
 }
 
 /// Shows the menu (blocking) and returns the index of the entry to boot:
 /// the user's choice, or `default_entry` when the countdown elapses.
-pub fn run(cfg: &BootConfig, entries: &[Entry]) -> usize {
+///
+/// `secure_boot` is the platform's reported Secure Boot state; when it is on,
+/// a warning row is drawn above the bottom border.
+pub fn run(cfg: &BootConfig, entries: &[Entry], secure_boot: SecureBootState) -> usize {
     if entries.is_empty() {
         return 0;
     }
 
+    let warn = secure_boot::warning(secure_boot);
     let timeout = cfg.timeout.unwrap_or(DEFAULT_TIMEOUT);
     let default_idx = cfg
         .default_entry
@@ -145,7 +159,7 @@ pub fn run(cfg: &BootConfig, entries: &[Entry]) -> usize {
                 .flatten()
                 .map(|m| (m.columns(), m.rows()))
                 .unwrap_or((80, 25));
-            let layout = Layout::new(cols, rows, entries.len());
+            let layout = Layout::new(cols, rows, entries.len(), warn.is_some());
             let deadline_ms = timeout.saturating_mul(1000);
             let mut selected = default_idx;
             let mut prev_selected = selected;
@@ -157,7 +171,15 @@ pub fn run(cfg: &BootConfig, entries: &[Entry]) -> usize {
             loop {
                 if dirty_full {
                     let remaining = remaining_seconds(elapsed_ms, deadline_ms);
-                    draw_all(out, &layout, entries, selected, scroll_top, remaining, timeout);
+                    let frame = Frame {
+                        entries,
+                        selected,
+                        scroll_top,
+                        remaining,
+                        timeout,
+                        warn,
+                    };
+                    draw_all(out, &layout, &frame);
                     drawn_second = remaining;
                     prev_selected = selected;
                     dirty_full = false;
@@ -183,9 +205,7 @@ pub fn run(cfg: &BootConfig, entries: &[Entry]) -> usize {
                             dirty_rows = true;
                         }
                     }
-                    Ok(Some(Key::Special(ScanCode::DOWN)))
-                        if selected + 1 < entries.len() =>
-                    {
+                    Ok(Some(Key::Special(ScanCode::DOWN))) if selected + 1 < entries.len() => {
                         prev_selected = selected;
                         selected += 1;
                         if selected >= scroll_top + layout.entry_rows {
@@ -201,9 +221,7 @@ pub fn run(cfg: &BootConfig, entries: &[Entry]) -> usize {
                         scroll_top = 0;
                         dirty_full = true;
                     }
-                    Ok(Some(Key::Special(ScanCode::END)))
-                        if selected + 1 < entries.len() =>
-                    {
+                    Ok(Some(Key::Special(ScanCode::END))) if selected + 1 < entries.len() => {
                         prev_selected = selected;
                         selected = entries.len() - 1;
                         if selected >= scroll_top + layout.entry_rows {
@@ -219,9 +237,7 @@ pub fn run(cfg: &BootConfig, entries: &[Entry]) -> usize {
                         }
                         dirty_full = true;
                     }
-                    Ok(Some(Key::Special(ScanCode::PAGE_DOWN)))
-                        if selected + 1 < entries.len() =>
-                    {
+                    Ok(Some(Key::Special(ScanCode::PAGE_DOWN))) if selected + 1 < entries.len() => {
                         prev_selected = selected;
                         selected = (selected + layout.entry_rows).min(entries.len() - 1);
                         if selected >= scroll_top + layout.entry_rows {
@@ -248,39 +264,56 @@ pub fn run(cfg: &BootConfig, entries: &[Entry]) -> usize {
     })
 }
 
-/// Renders the whole menu frame: borders, title, entries, status and scroll
-/// markers. Call once per repaint; incremental updates repaint only the rows
-/// that changed.
-fn draw_all(
-    out: &mut Output,
-    l: &Layout,
-    entries: &[Entry],
+/// Immutable per-frame state shared by the render functions.
+struct Frame<'a> {
+    entries: &'a [Entry],
     selected: usize,
     scroll_top: usize,
     remaining: u32,
     timeout: u32,
-) {
+    warn: Option<&'a str>,
+}
+
+/// Renders the whole menu frame: borders, title, entries, status, warning and
+/// scroll markers. Call once per repaint; incremental updates repaint only the
+/// rows that changed.
+fn draw_all(out: &mut Output, l: &Layout, f: &Frame) {
     hline(out, l, l.top, TL, HLINE, TR);
     draw_title(out, l);
     hline(out, l, l.header_row, HDIV, HLINE, UDIV);
     let mut i = 0;
     while i < l.entry_rows {
-        let idx = scroll_top + i;
-        if idx < entries.len() {
-            draw_entry(out, l, &entries[idx], l.first_entry_row + i, idx == selected);
+        let idx = f.scroll_top + i;
+        if idx < f.entries.len() {
+            draw_entry(
+                out,
+                l,
+                &f.entries[idx],
+                l.first_entry_row + i,
+                idx == f.selected,
+            );
         } else {
             clear_row(out, l, l.first_entry_row + i);
         }
         i += 1;
     }
     hline(out, l, l.status_row - 1, HDIV, HLINE, UDIV);
-    draw_status(out, l, remaining, timeout);
+    draw_status(out, l, f.remaining, f.timeout);
+    if let (Some(row), Some(warn)) = (l.warn_row, f.warn) {
+        draw_warning(out, l, row, warn);
+    }
     hline(out, l, l.bottom, BL, HLINE, BR);
-    if scroll_top > 0 {
+    if f.scroll_top > 0 {
         write_glyph(out, l, l.frame_left + l.content_w, l.header_row, SCROLL_UP);
     }
-    if scroll_top + l.entry_rows < entries.len() {
-        write_glyph(out, l, l.frame_left + l.content_w, l.status_row - 1, SCROLL_DOWN);
+    if f.scroll_top + l.entry_rows < f.entries.len() {
+        write_glyph(
+            out,
+            l,
+            l.frame_left + l.content_w,
+            l.status_row - 1,
+            SCROLL_DOWN,
+        );
     }
     let _ = out.set_color(Color::LightGray, Color::Black);
 }
@@ -396,7 +429,9 @@ fn draw_status(out: &mut Output, l: &Layout, remaining: u32, timeout: u32) {
     } else {
         (u64::from(remaining) * BAR_WIDTH as u64 / u64::from(timeout)) as usize
     };
-    let pad = l.content_w.saturating_sub(help.num_chars() + right.num_chars() + BAR_WIDTH);
+    let pad = l
+        .content_w
+        .saturating_sub(help.num_chars() + right.num_chars() + BAR_WIDTH);
 
     let mut seg = CString16::new();
     seg.push(VLINE);
@@ -414,15 +449,55 @@ fn draw_status(out: &mut Output, l: &Layout, remaining: u32, timeout: u32) {
     for _ in 0..filled.min(BAR_WIDTH) {
         bar.push(FILL);
     }
-    write_at(out, l, right_col + right.num_chars(), l.status_row, bar.as_ref());
+    write_at(
+        out,
+        l,
+        right_col + right.num_chars(),
+        l.status_row,
+        bar.as_ref(),
+    );
     let _ = out.set_color(Color::DarkGray, Color::Black);
     let mut rest = CString16::new();
     for _ in filled.min(BAR_WIDTH)..BAR_WIDTH {
         rest.push(EMPTY);
     }
-    write_at(out, l, right_col + right.num_chars() + filled.min(BAR_WIDTH), l.status_row, rest.as_ref());
+    write_at(
+        out,
+        l,
+        right_col + right.num_chars() + filled.min(BAR_WIDTH),
+        l.status_row,
+        rest.as_ref(),
+    );
     let _ = out.set_color(Color::LightGray, Color::Black);
     write_glyph(out, l, l.frame_left + l.frame_w - 1, l.status_row, VLINE);
+}
+
+/// The Secure Boot warning row: yellow on black, between the status line and
+/// the bottom border. Text is truncated with `...` when it would overflow.
+fn draw_warning(out: &mut Output, l: &Layout, row: usize, warn: &str) {
+    let _ = out.set_color(Color::Yellow, Color::Black);
+    let mut buf = CString16::new();
+    buf.push(VLINE);
+    buf.push(SPACE);
+    let max = l.content_w.saturating_sub(3);
+    let chars: Vec<char> = warn.chars().collect();
+    let (body, suffix) = if chars.len() > max {
+        (&chars[..max.saturating_sub(3)], &['.', '.', '.'][..])
+    } else {
+        (chars.as_slice(), &[][..])
+    };
+    let mut used = 0;
+    for &c in body.iter().chain(suffix.iter()) {
+        buf.push(Char16::try_from(c).unwrap_or(SPACE));
+        used += 1;
+    }
+    while used < max {
+        buf.push(SPACE);
+        used += 1;
+    }
+    buf.push(VLINE);
+    write_at(out, l, l.frame_left, row, buf.as_ref());
+    let _ = out.set_color(Color::LightGray, Color::Black);
 }
 
 /// Draws a horizontal border line between the two end caps.

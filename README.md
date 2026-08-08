@@ -13,7 +13,7 @@
 
 `▐▀` `-` `▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▌`
 
-The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**, It acquires the **`[BGRT]`** motherboard logo and the **`[GOP]`** frame buffer without ever calling `set_mode`, then chainloads any `\EFI\*.efi` boot entry — its own kernel included — with the screen untouched and zero flicker.
+The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**, It acquires the **`[BGRT]`** motherboard logo and the **`[GOP]`** frame buffer without ever calling `set_mode`, then chainloads any `\EFI\*.efi` boot entry — its own kernel included — with the screen untouched.
 
 - **`[Version]`**: **`[0.7.0]`**
 
@@ -57,10 +57,11 @@ The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**
 - Optional `gop-ui` feature — adds a feature-gated GOP framebuffer renderer scaffold for the bootloader, currently used to draw a placeholder splash before the text-mode menu
 - Boot config — `\EFI\leon\boot.toml` is written by `lbt config set` and parsed + validated by the loader at every boot (a broken file yields defaults, never a blocked boot)
 - Geometry record — every boot records the real geometry + resolved config as `\EFI\leon\bootinfo.json` for host tooling
+- Secure Boot — reads the `SecureBoot`/`SetupMode` global variables, warns on the menu and in the log when it is active, and reports a firmware `ACCESS_DENIED`/`SECURITY_VIOLATION` rejection of an unsigned entry instead of failing silently (`scripts/sign.sh` self-signs the loader + kernel; see `docs/secure-boot.md`)
 - EFI-stub kernel — `lbl-kernel` is a plain UEFI application that acquires GOP + BGRT itself and never receives a handoff blob
 - Shared ABI — `common/` is the single source of truth for the pixel formats, frame buffer geometry, BGRT metadata, and the `boot.toml` parser
 - Ultra-silent logging — errors go to `\var\logs\leon\log.md` (capped at 64 KiB), nothing ever touches the screen
-- `lbt` build tool — discover ESPs and boot entries, author + preview splash themes, run plugins and TUIs (a keyboard-driven boot-manager menu ships as the default), manage the boot config (Python/`cps` engine is an opt-in cargo feature)
+- `lbt` build tool — discover ESPs and boot entries, run the keyboard-driven boot-manager TUI (a pure-Rust ratatui app), manage the boot config (no embedded Python/`cps`)
 - Dual architecture — amd64 and arm64 from a single host
 - Five build front-ends — Make, Ninja, Meson, Cargo, and a CMake toolchain, all with auto-detected architecture
 
@@ -111,12 +112,13 @@ The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**
 | Config | `src/boot/config.rs` | Read + validate `\EFI\leon\boot.toml` (best-effort defaults) |
 | Menu | `src/boot/menu.rs` | Optional `splash = true` menu; boxed/colored frame sized to the text mode, timeout countdown bar, `default_entry`, any-entry boot |
 | Chainload | `src/boot/image.rs` | `LoadImage`/`StartImage` of any entry via its device path |
+| Secure Boot | `src/secure_boot.rs` | Read `SecureBoot`/`SetupMode` globals; menu + log warning; report firmware SB rejections |
 | Geometry record | `src/record/dump.rs` | Write `\EFI\leon\bootinfo.json` (geometry + resolved config) |
 | Logger | `src/logger/mod.rs` | Capped Markdown log, silently dropped on failure |
 | Shared ABI | `common/src/geometry.rs` | `Framebuffer` / `Bgrt` / `PixelFormat` structs |
 | Boot config parser | `common/src/boot_config.rs` | `no_std` parser for `boot.toml`, shared with `lbt` |
 | Kernel | `kernel/src/{gop,bgrt,memmap,marker,main}.rs` | EFI-stub kernel — self-acquires GOP + BGRT, EBS, marker, halt |
-| Build tool | `lbt/` | Host tool — ESP/boot-entry discovery, themes, plugins, boot config |
+| Build tool | `lbt/` | Host tool — ESP/boot-entry discovery, the boot-manager TUI, boot config |
 
 ---
 
@@ -159,11 +161,19 @@ The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**
    The live frame buffer + BGRT geometry and the resolved config are
    written to \EFI\leon\bootinfo.json for host tooling.
 
-6. Choose an entry
+6. Check the Secure Boot state
+   The `SecureBoot`/`SetupMode` global variables are read once. When Secure
+   Boot is active a warning row appears in the boot menu and a line is
+   appended to the boot log; the images still boot if they are signed with a
+   key enrolled in the platform's db. If the firmware later rejects an entry
+   at LoadImage time (ACCESS_DENIED / SECURITY_VIOLATION), the rejection is
+   reported in the log with a hint to sign it or enroll its key.
+
+7. Choose an entry
    With `splash = true` a menu appears; otherwise (or on timeout) the
    `default_entry` is booted, falling back to the first discovered entry.
 
-7. Chainload
+8. Chainload
    The chosen image is loaded with LoadImage and started with StartImage
    (BootPolicy::BootSelection), still without touching the screen. The
    EFI-stub kernel then does its own GOP/BGRT acquisition, calls
@@ -268,7 +278,7 @@ Chainloading is done with the standard UEFI protocol — no manual PE loading:
 4. StartImage — the loaded image runs, the screen is never touched
 ```
 
-Because the entries file is written every boot, `lbt discover` and theme previewing always see what this firmware actually exposes. The kernel at `\EFI\leon\kernel.efi` is just one of those entries.
+Because the entries file is written every boot, `lbt discover` and the boot-manager TUI always see what this firmware actually exposes. The kernel at `\EFI\leon\kernel.efi` is just one of those entries.
 
 ---
 
@@ -338,14 +348,19 @@ make stage
 # Install onto a mounted ESP (also installs docs/man pages)
 make install DESTDIR=/mnt/esp
 
-# Build a FAT16 ESP image (requires mtools) -> build/leon-esp.img
+# Build a GPT ESP image with an ESP partition (requires mtools + fdisk/sgdisk) -> build/leon-esp.img
 make esp
+
+# Self-sign the staged loader + kernel for Secure Boot (after `scripts/sign.sh setup`)
+make sign
 
 # Boot under QEMU/OVMF (amd64) or QEMU/AAVMF (arm64)
 make qemu
 ```
 
 On real hardware the bootloader must use the UEFI-canonical removable-media name — `BOOTX64.EFI` on amd64, `BOOTAA64.EFI` on arm64 — so it is found automatically by the firmware. The kernel lives at `EFI/leon/kernel.efi` and is discovered as a regular boot entry; every other entry on the ESP is chainloadable too.
+
+For Secure Boot, generate a personal key set, enroll the `.esl` files in the firmware, and sign the staged tree — full instructions in `docs/secure-boot.md` (`scripts/sign.sh setup`, then `make sign` after every rebuild).
 
 The bootloader reads its configuration from `EFI/leon/boot.toml` on the same volume. `lbt config set timeout 5` writes the config to `~/.config/leon/boot.toml` and mirrors it onto every mounted EFI System Partition, so the next boot picks it up.
 
@@ -362,16 +377,15 @@ The bootloader reads its configuration from `EFI/leon/boot.toml` on the same vol
 |----------|--------------|-------------|
 | `target/<uefi-target>/release/lbl.efi` | amd64 / arm64 | Chainloading bootloader PE32+ image |
 | `kernel/target/<uefi-target>/release/lbl-kernel.efi` | amd64 / arm64 | EFI-stub kernel PE32+ image |
-| `target/<musl-target>/release/lbt` | host | Build tool, `python` variant (`make lbt`) — themes, plugins, TUIs |
-| `target/lbt-core/<musl-target>/release/lbt` | host | Python-free static-pie variant (`make lbt-core`) |
+| `target/<musl-target>/release/lbt` | host | Build tool (`make lbt`) — discovery, boot-manager TUI, boot config |
 | `build/esp/EFI/BOOT/BOOTX64.EFI` | amd64 | Staged, UEFI-canonical boot file |
 | `build/esp/EFI/BOOT/BOOTAA64.EFI` | arm64 | Staged, UEFI-canonical boot file |
 | `build/esp/EFI/leon/kernel.efi` | both | Kernel as a discovered boot entry |
-| `build/leon-esp.img` | both | FAT16 ESP image (`make esp`) |
+| `build/leon-esp.img` | both | GPT ESP image with an ESP partition (`make esp`) |
 
-`lbt` is a std (host) binary built for the ecosystem target (`x86_64`/`aarch64`-`unknown-linux-musl`) and lives outside the ESP: `make stage`, `make esp`, and `make qemu` build only the bootloader + kernel and never need it (or its `cps` git dependency). Two variants of the same crate share the binary name `lbt` but land in **separate** target dirs — `make lbt` builds the `python` variant (themes/plugins/TUIs) into `target/`, `make lbt-core` the python-free static-pie variant into `target/lbt-core/` — so neither can overwrite the other. Don't run a python-gated subcommand on the `lbt-core` binary: `lbt theme …`/`lbt plugin …`/`lbt tui …` are only compiled in the `python` variant and report `error: unrecognized subcommand 'theme'` on the python-free one.
+`lbt` is a std (host) binary built for the ecosystem target (`x86_64`/`aarch64`-`unknown-linux-musl`) and lives outside the ESP: `make stage`, `make esp`, and `make qemu` build only the bootloader + kernel and never need it (or its transitive dependencies).
 
-The python variant ships a default, keyboard-driven boot-manager TUI — `lbt/tuis/leon_menu.py`, embedded in the binary and materialized to `~/.config/leon/tuis/` on first use. `lbt tui` (or `lbt tui run`) launches it against the configured default (falling back to the shipped menu); `lbt tui run <name>` launches a registered TUI; `lbt tui list` lists registrations from `t.desc`; `lbt tui apply <name>` persists a TUI as the default in `~/.config/leon/python.toml`. The menu is pure stdlib (no curses), uses the full keymap (arrows/`hjkl`, PgUp/PgDn, Home/End, `1-9`/`0`, `/` search, `n`/`N`, Tab/Shift+Tab, resize, `Enter`/space boot preview, `q`/Esc/Ctrl+C quit), and receives live framebuffer + BGRT geometry, discovered boot entries, and the boot config through `LEON_*` environment variables.
+`lbt` ships a default, keyboard-driven boot-manager TUI (`lbt tui`) — a pure-Rust ratatui/crossterm app, no embedded Python. It receives live framebuffer + BGRT geometry, discovered boot entries, and the boot config, and uses the full keymap (arrows/`hjkl`, PgUp/PgDn, Home/End, `1-9`/`0`, `/` search with `n`/`N` and `p` un-filter, `d` detail panel, `h` help, `r` refresh, `Enter`/space/`s` boot preview, `q`/Esc/Ctrl+C quit).
 
 **Release profile:**
 
@@ -411,28 +425,25 @@ rustup target add x86_64-unknown-linux-musl   # host `lbt`
 rustup target add aarch64-unknown-linux-musl  # host `lbt`
 ```
 
-The bootloader and kernel are UEFI applications (`*-unknown-uefi`); the host tool `lbt` follows the ecosystem convention (`*-unknown-linux-musl`, `/system` prefix, clang/llvm). `make lbt` links against a static musl CPython that `make python` provisions (musl + CPython 3.14 built from source into `$(PREFIX)`, `/system` by default). The python-free `lbt-core` target has no such requirement.
+The bootloader and kernel are UEFI applications (`*-unknown-uefi`); the host tool `lbt` follows the ecosystem convention (`*-unknown-linux-musl`, `/system` prefix, clang/llvm). `lbt` is pure Rust (ratatui/crossterm) and has no Python/pyo3 dependency.
 
 ### Make
 
 ```sh
-make build                    # bootloader + kernel + lbt (python), auto arch
-make python                   # provision static musl CPython into $(PREFIX)
-make install-pyo3-config      # install lbt/pyo3-musl-config.toml to /etc/lbt
-make lbt-core                 # python-free lbt only (no CPython needed)
+make build                    # bootloader + kernel + lbt, auto arch
+make lbt                      # lbt only (host, musl target)
 make stage                    # ESP tree at build/esp (bootloader + kernel only)
 make install DESTDIR=/mnt/esp # staged install onto a mounted ESP
 make ARCH=arm64 build         # cross-build for arm64
 make test                     # generic host tests (workspace, default features)
 make clippy                   # lint everything with -D warnings
 make qemu                     # boot under QEMU/OVMF or AAVMF
-make esp                      # FAT16 ESP image (mtools)
+make esp                      # GPT ESP image (mtools + fdisk/sgdisk)
+make sign                     # sign the staged tree for Secure Boot
 make clean
 ```
 
-`make build`/`make lbt` compile `lbt` too. `lbt: cps-update python`, so each run first fetches `cps` (a git dependency pinned in `Cargo.lock`) into `$HOME/.cargo/git/cps` (clone if missing, then `fetch origin` + checkout of `CPS_REF`) and provisions the static musl CPython via `scripts/build_python.sh` into `$(PREFIX)` (`/system` by default; no-op when `$(PREFIX)/lib/libpython3.14.a` already exists). Both `lbt` variants honor `PROFILE` (default `release`, the same profile the bootloader and kernel build). `make stage`/`install`/`esp`/`qemu` deliberately skip `lbt` and only produce the ESP tree.
-
-The pyo3 build config for the shared cps tooling is committed at `lbt/pyo3-musl-config.toml` (the same keys `scripts/build_python.sh` resolves — a static, shared-free CPython 3.14). To ensure consistent musl builds the committed and installed TOML now sets `build_flags=-C target-feature=+crt-static` so cargo/pyo3 links with a static CRT. `make install-pyo3-config` (also part of `make install`) copies it to `/etc/lbt/pyo3-musl-config.toml`, the system-wide location cps searches, DESTDIR-aware so it stages cleanly.
+`make build`/`make lbt` compile `lbt` too. `lbt` honors `PROFILE` (default `release`, the same profile the bootloader and kernel build). `make stage`/`install`/`esp`/`qemu` deliberately skip `lbt` and only produce the ESP tree.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -441,9 +452,6 @@ The pyo3 build config for the shared cps tooling is committed at `lbt/pyo3-musl-
 | `DESTDIR` | — | Staged install root |
 | `PREFIX` | `/system` | Install prefix |
 | `SYSROOT` | `/` | Build root (the actual root, never a rootfs dir) |
-| `CPS_DIR` | `$HOME/.cargo/git/cps` | Seed clone for the `cps` git dependency (`CPS_REF` pins the rev) |
-| `PY_PREFIX` | `$(PREFIX)` | Prefix the static musl CPython is provisioned into |
-| `PY_DESTDIR` | — | Staging root for the provisioned CPython (when `PY_PREFIX` isn't writable); `PYO3_CONFIG` derives from `$(PY_DESTDIR)$(PY_PREFIX)` |
 
 ### Ninja
 
@@ -463,7 +471,7 @@ meson compile -C builddir                   # lbl.efi + lbl-kernel.efi + lbt
 meson install -C builddir
 ```
 
-The Meson `lbt` target is a host cargo build for the musl target (plus `lbt-core` for the python-free variant); like the Makefile it pulls `cps` in as a git dependency, so the machine needs network (or the same cargo git rewrite).
+The Meson `lbt` target is a host cargo build for the musl target; like the Makefile it needs no network for dependencies (all of `lbt`'s deps are crates.io, pinned in `Cargo.lock`).
 
 ### Cargo (direct)
 
@@ -527,8 +535,7 @@ cargo clippy --all-targets --target x86_64-unknown-uefi -- -D warnings
 cargo clippy --all-targets --target aarch64-unknown-uefi -- -D warnings
 
 # Host-side unit tests
-cargo test -p lbt            # CLI, discovery, geometry, boot-config parity
-cargo test -p lbt --features python
+cargo test -p lbt            # CLI, discovery, geometry, TUI, boot-config parity
 cargo test -p leon-common    # the shared no_std boot.toml parser
 
 # Format check
@@ -543,6 +550,7 @@ The `lbt` test suite includes a parity test that feeds everything `lbt config se
 |--------|---------|------------------|
 | QEMU/OVMF | `make qemu` | Silent chainload to the kernel marker under emulation |
 | QEMU/AAVMF | `make ARCH=arm64 qemu` | The same on arm64 |
+| QEMU Secure Boot | `make esp` + snakeoil-signed images (`docs/secure-boot.md`) | Menu warning, signed-kernel boot, unsigned-kernel `ACCESS_DENIED` reporting |
 | Real hardware | `make install DESTDIR=/mnt/esp` | Firmware logo preserved end-to-end |
 
 ---
@@ -560,33 +568,29 @@ Leon/
 ├── LICENSE                 # MIT License
 ├── PROMPT.md               # Design blueprint
 ├── README.md               # This documentation
-├── t.desc                  # Shipped cps descriptor (registers the default TUI)
 ├── common/
 │   └── src/
 │       ├── lib.rs          # Re-exports the shared ABI
 │       ├── geometry.rs     # Framebuffer / Bgrt / PixelFormat shared ABI
 │       └── boot_config.rs  # Shared no_std parser for \EFI\leon\boot.toml
 ├── lbt/
-│   ├── Cargo.toml          # Leon Build Tool (host, std; `python` feature)
-│   ├── pyo3-musl-config.toml  # Committed pyo3 config, installed to /etc/lbt
-│   ├── tuis/
-│   │   └── leon_menu.py    # Default keyboard-driven boot-manager TUI (embedded)
+│   ├── Cargo.toml          # Leon Build Tool (host, std; ratatui + crossterm)
 │   └── src/
 │       ├── main.rs         # Slim entry: clap -> Command dispatch
-│       ├── cli.rs          # info / discover / theme / plugin / config / tui
+│       ├── cli.rs          # info / discover / tui / config
 │       ├── discovery.rs    # ESP + boot-entry discovery (lsblk / mount table)
 │       ├── geometry.rs     # Geometry + sysfs/BMP/dump parsing (host mirror)
 │       ├── boot_config.rs  # Host boot.toml model + sync to mounted ESPs
-│       ├── python.rs       # ~/.config/leon/python.toml + cps engine init
-│       └── commands/       # info / discover / theme / plugin / config / tui
+│       └── commands/       # info / discover / tui (ratatui menu) / config
 ├── src/
 │   ├── main.rs             # Module wiring + uefi_main
 │   ├── boot/
 │   │   ├── mod.rs          # run(): config -> discover -> record -> menu -> chainload
 │   │   ├── config.rs       # Read + validate \EFI\leon\boot.toml
 │   │   ├── entries.rs      # \EFI\*.efi discovery -> entries.jsonc (JSONC)
-│   │   ├── image.rs        # LoadImage / StartImage chainloading
-│   │   └── menu.rs         # Optional splash menu (boxed, colored, countdown bar)
+│   │   ├── image.rs        # LoadImage / StartImage chainloading; SB rejection reporting
+│   │   └── menu.rs         # Optional splash menu (boxed, colored, countdown bar, SB warning)
+│   ├── secure_boot.rs      # SecureBoot/SetupMode state + warning text
 │   ├── firmware/
 │   │   ├── bgrt.rs         # ACPI RSDP/XSDT/BGRT + BMP dimensions
 │   │   └── gop.rs          # Frame buffer capture (no set_mode)
@@ -607,7 +611,9 @@ Leon/
 ├── docs/
 │   ├── lbt.1               # Man page for the build tool
 │   ├── lbl.1               # Man page for the bootloader
-│   └── leon-common.7       # Man page for the shared ABI + boot config
+│   ├── leon-common.7       # Man page for the shared ABI + boot config
+│   └── secure-boot.md      # Secure Boot signing + enrollment guide
+├── keys/                   # Self-signed Secure Boot key set (git-ignored; scripts/sign.sh setup)
 ├── Makefile / env.mk       # Make front-end (auto arch; UEFI + musl)
 ├── build.ninja             # Ninja front-end
 ├── meson.build             # Meson front-end (lbl.efi + lbl-kernel.efi + lbt)
@@ -617,7 +623,9 @@ Leon/
 ├── .cargo/config.toml      # Per-target rustflags (rust-lld)
 └── scripts/
     ├── run_qemu.sh         # QEMU/OVMF or QEMU/AAVMF boot
-    └── make_esp.sh         # FAT16 ESP image (mtools)
+    ├── make_esp.sh         # GPT ESP image (mtools + fdisk/sgdisk)
+    ├── sign.sh             # Secure Boot key setup + self-signing
+    └── gen-esl.py          # X.509 -> EFI_SIGNATURE_LIST (.esl) writer
 ```
 
 ---
@@ -633,11 +641,10 @@ Leon/
 |-------|---------|---------|
 | `uefi` | 0.39 | Boot services, GOP, config tables, Simple File System, `LoadImage`/`StartImage`, global allocator (bootloader + kernel) |
 | `leon-common` | 0.7.0 | Shared `Framebuffer`/`Bgrt`/`PixelFormat` ABI + the `boot.toml` parser (workspace) |
-| `cps` | git (rev pinned in `Cargo.lock`) | Theme/plugin engine used by `lbt`, gated behind the opt-in `python` feature |
-| `pyo3` | — | Python bindings for `cps`, also gated behind the `python` feature |
+| `ratatui` / `crossterm` | — | The `lbt` boot-manager TUI (pure Rust, no embedded Python) |
 | `clap` / `anyhow` / `toml` / `serde_json` | — | `lbt` CLI, config serialization, and JSON output |
 
-The bootloader depends only on `uefi` and `leon-common`. The kernel depends on `uefi` and `leon-common` (`default-features = false`, keeping the `boot.toml` parser which needs `alloc` out of its code). `lbt`'s `python` feature is opt-in: `cargo build -p lbt` links zero Python/pyo3 code, while `make build` and `make clippy` build the full tool.
+The bootloader depends only on `uefi` and `leon-common`. The kernel depends on `uefi` and `leon-common` (`default-features = false`, keeping the `boot.toml` parser which needs `alloc` out of its code). `lbt` is a std host binary with no optional features.
 
 ---
 

@@ -3,9 +3,10 @@
 //! An ultra-silent, BGRT-preserving UEFI bootloader written in Rust. lbl is a
 //! *chainloader* in the style of systemd-boot: on every boot it
 //!
-//! 1. discovers every boot entry on the ESP — every `\EFI\<vendor>\*.efi`,
-//!    including Leon's own EFI-stub kernel — and persists them to a
-//!    configurable JSONC entries file (`\EFI\leon\entries.jsonc` by default);
+//! 1. discovers every boot entry on the ESP — every `\EFI\<vendor>\*.efi`
+//!    (recursively), including Leon's own EFI-stub kernel — labels them by
+//!    file stem, and persists them to a configurable JSONC entries file
+//!    (`\EFI\leon\entries.jsonc` by default);
 //! 2. shows an opt-in splash menu (`splash = true` in `\EFI\leon\boot.toml`);
 //! 3. chainloads the chosen (or default) entry with
 //!    `LoadImage`/`StartImage`, exactly like the firmware Boot Manager does.
@@ -32,6 +33,7 @@ mod boot;
 mod firmware;
 mod logger;
 mod record;
+mod secure_boot;
 
 #[cfg(feature = "gop-ui")]
 mod ui;

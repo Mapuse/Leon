@@ -25,12 +25,24 @@ esac
 
 ESP=build/leon-esp.img
 rm -f "$ESP"
-# 64 MiB FAT16 ESP.
+# 64 MiB GPT disk image with a single EFI System partition starting at sector
+# 2048 (1 MiB alignment). A raw FAT volume is not picked up as a bootable disk
+# by OVMF/AAVMF; firmware expects an ESP partition on a GPT (or MBR) disk.
 dd if=/dev/zero of="$ESP" bs=1M count=64 status=none
-mformat -i "$ESP" -F -h 64 -s 32 ::
-mmd -i "$ESP" ::/EFI ::/EFI/BOOT ::/EFI/leon
-mcopy -i "$ESP" build/esp/EFI/BOOT/$BOOT_FILE ::/EFI/BOOT/
-mcopy -i "$ESP" build/esp/EFI/leon/kernel.efi ::/EFI/leon/
+if command -v sgdisk >/dev/null 2>&1; then
+    sgdisk -o "$ESP" >/dev/null
+    sgdisk -n 1:2048:0 -t 1:ef00 "$ESP" >/dev/null
+elif command -v fdisk >/dev/null 2>&1; then
+    printf 'g\nn\n1\n\n\nt\n1\nw\n' | fdisk "$ESP" >/dev/null
+else
+    echo "sgdisk or fdisk not found." >&2
+    exit 1
+fi
+# The ESP partition lives at byte offset 1 MiB; mtools addresses it directly.
+mformat -i "$ESP"@@1048576 -F -h 64 -s 32 ::
+mmd -i "$ESP"@@1048576 ::/EFI ::/EFI/BOOT ::/EFI/leon
+mcopy -i "$ESP"@@1048576 build/esp/EFI/BOOT/$BOOT_FILE ::/EFI/BOOT/
+mcopy -i "$ESP"@@1048576 build/esp/EFI/leon/kernel.efi ::/EFI/leon/
 echo "ESP image written: $ESP"
 echo "For real hardware, copy build/esp/EFI/BOOT/$BOOT_FILE to your ESP's EFI/BOOT/"
 echo "and build/esp/EFI/leon/kernel.efi to EFI/leon/kernel.efi."

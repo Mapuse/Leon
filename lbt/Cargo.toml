@@ -3,27 +3,21 @@ name = "lbt"
 version = "0.7.0"
 edition = "2024"
 license = "MIT"
-description = "lbt — Leon Build Tool. Author/preview boot splash+menu themes, run plugins, manage boot config"
+description = "lbt — Leon Build Tool. Discover boot entries, run the boot-manager TUI, manage boot config"
 
 [[bin]]
 name = "lbt"
 path = "src/main.rs"
 
-[features]
-# Python runtime (themes, plugins, TUIs) via cps. Off by default so a plain
-# `cargo build -p lbt` links zero Python/pyo3 code; enable with `--features
-# python` when authoring/previewing themes or running TUIs/plugins.
-default = []
-python = ["dep:cps"]
-
 [dependencies]
-cps = { git = "https://github.com/Mapuse/CPS", rev = "d8d5f7da49917ea7636147b8a65f3541311c45ab", optional = true }
 leon-common = { path = "../common" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 anyhow = "1"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [dev-dependencies]
 libc = "0.2"

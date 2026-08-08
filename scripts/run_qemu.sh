@@ -11,15 +11,23 @@ HOST_ARCH="${ARCH:-$(uname -m)}"
 case "$HOST_ARCH" in
   x86_64|amd64)
     QEMU_BIN="qemu-system-x86_64"
-    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE.fd}"
-    OVMF_VARS="${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS.fd}"
+    OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS="${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
     MACHINE="-machine q35"
+    CPU="-cpu max"
+    GPU=""   # q35 provides a VGA with a linear-framebuffer GOP
     ;;
   aarch64|arm64)
     QEMU_BIN="qemu-system-aarch64"
     OVMF_CODE="${OVMF_CODE:-/usr/share/AAVMF/AAVMF_CODE.fd}"
     OVMF_VARS="${OVMF_VARS:-/usr/share/AAVMF/AAVMF_VARS.fd}"
-    MACHINE="-machine virt"
+    # AAVMF needs RAM below 4G (highmem=off) and a display device: virt has
+    # no VGA, and virtio-gpu only exposes a BLT-only GOP, so use ramfb — a
+    # linear framebuffer GOP the firmware drives. Without it the loader finds
+    # no GOP and aborts.
+    MACHINE="-machine virt,highmem=off"
+    CPU="-cpu cortex-a57"
+    GPU="-device ramfb"
     ;;
   *)
     echo "Unsupported architecture: $HOST_ARCH (supported: x86_64, aarch64)" >&2
@@ -38,16 +46,21 @@ if [ ! -f "$OVMF_CODE" ]; then
 fi
 
 mkdir -p build
-# OVMF_VARS must be writable; keep the original pristine.
-if [ ! -f build/ovmf_vars.fd ]; then
-    cp "$OVMF_VARS" build/ovmf_vars.fd
+# OVMF_VARS must be writable; keep the original pristine. Cache per arch and
+# per source file: switching ARCH (amd64 vs arm64 use different flash sizes)
+# or pointing OVMF_VARS at the Secure Boot snakeoil vars must never reuse a
+# stale copy.
+VARS_CACHE="build/ovmf_vars_${HOST_ARCH}_$(basename "$OVMF_VARS")"
+if [ ! -f "$VARS_CACHE" ] || [ "$(stat -c %s "$VARS_CACHE" 2>/dev/null)" != "$(stat -c %s "$OVMF_VARS")" ]; then
+    cp "$OVMF_VARS" "$VARS_CACHE"
 fi
 
 exec "$QEMU_BIN" \
     $MACHINE \
-    -cpu max \
+    $CPU \
+    $GPU \
     -m 512M \
     -drive file="$OVMF_CODE",format=raw,if=pflash,readonly=on \
-    -drive file=build/ovmf_vars.fd,format=raw,if=pflash \
-    -drive file=fat:ro:build/esp,format=raw \
+    -drive file="$VARS_CACHE",format=raw,if=pflash \
+    -drive file=fat:rw:build/esp \
     -serial mon:stdio

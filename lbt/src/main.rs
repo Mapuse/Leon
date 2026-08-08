@@ -6,9 +6,6 @@ mod commands;
 mod discovery;
 mod geometry;
 
-#[cfg(feature = "python")]
-mod python;
-
 fn main() -> Result<()> {
     cli::run()
 }

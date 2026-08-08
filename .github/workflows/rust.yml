@@ -1,0 +1,34 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "source" ]
+  pull_request:
+    branches: [ "source" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-latest, uefi: x86_64-unknown-uefi, musl: x86_64-unknown-linux-musl }
+          - { arch: arm64, os: ubuntu-24.04-arm, uefi: aarch64-unknown-uefi, musl: aarch64-unknown-linux-musl }
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.uefi }},${{ matrix.musl }}
+    - name: Build bootloader + kernel (UEFI)
+      run: cargo build --locked --target ${{ matrix.uefi }}
+    - name: Build lbt (host)
+      run: cargo build --locked -p lbt
+    - name: Run tests
+      run: cargo test --locked --workspace --exclude leon

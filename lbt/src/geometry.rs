@@ -1,11 +1,10 @@
-//! Screen geometry that themes receive through the `leon_*` context keys.
+//! Screen geometry used by `lbt info` and the boot-manager TUI (`lbt tui`).
 //!
 //! Sources: either a `bootinfo.json` dump written by the bootloader on the
 //! boot volume, or live `/sys` discovery (the active console frame buffer via
 //! `virtual_size`/`stride`/`bits_per_pixel`, and the ACPI BGRT logo via
 //! `/sys/firmware/acpi/bgrt`). Nothing is ever invented or assumed.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -44,7 +43,7 @@ mod dump {
     }
 }
 
-/// Screen geometry that themes receive through the `leon_*` context keys.
+/// Screen geometry for the framebuffer and BGRT logo.
 pub struct Geometry {
     pub width: u32,
     pub height: u32,
@@ -56,8 +55,6 @@ pub struct Geometry {
     bgrt_status: u8,
     /// BGRT image type (0 = bitmap).
     bgrt_type: u8,
-    /// Set when a BGRT exists but could not be parsed (vs. genuinely absent).
-    pub logo_warning: Option<String>,
 }
 
 impl Geometry {
@@ -95,7 +92,6 @@ impl Geometry {
             logo,
             bgrt_status: bgrt.as_ref().map(|b| b.status).unwrap_or(0),
             bgrt_type: bgrt.as_ref().map(|b| b.image_type).unwrap_or(0),
-            logo_warning: None,
         })
     }
 
@@ -116,14 +112,9 @@ impl Geometry {
             .and_then(|s| s.trim().parse::<u16>().ok())
             .unwrap_or(0);
 
-        let (logo, bgrt_status, bgrt_type, logo_warning) = match bgrt_from_sysfs() {
-            Ok(logo) => (logo.rect, logo.status, logo.image_type, None),
-            Err(e) => (
-                None,
-                0,
-                0,
-                Some(format!("BGRT present but unusable: {e:#}")),
-            ),
+        let (logo, bgrt_status, bgrt_type) = match bgrt_from_sysfs() {
+            Ok(logo) => (logo.rect, logo.status, logo.image_type),
+            Err(_) => (None, 0, 0),
         };
 
         Ok(Self {
@@ -134,46 +125,7 @@ impl Geometry {
             logo,
             bgrt_status,
             bgrt_type,
-            logo_warning,
         })
-    }
-
-    /// The `leon_*` context keys themes receive; only used by `preview`, which
-    /// is Python-gated, so allow it to be dead when the python feature is off.
-    #[cfg_attr(not(feature = "python"), allow(dead_code))]
-    pub fn context(&self) -> HashMap<String, String> {
-        let mut m = HashMap::new();
-        m.insert("leon_fb_width".to_string(), self.width.to_string());
-        m.insert("leon_fb_height".to_string(), self.height.to_string());
-        m.insert("leon_fb_stride".to_string(), self.stride.to_string());
-        m.insert("leon_fb_format".to_string(), self.format.clone());
-        match self.logo {
-            Some((x0, y0, x1, y1)) => {
-                m.insert("leon_bgrt_rect".to_string(), format!("{x0},{y0},{x1},{y1}"));
-                m.insert(
-                    "leon_logo_center_x".to_string(),
-                    ((x0 + x1) / 2).to_string(),
-                );
-                m.insert(
-                    "leon_logo_center_y".to_string(),
-                    ((y0 + y1) / 2).to_string(),
-                );
-            }
-            None => {
-                m.insert("leon_bgrt_rect".to_string(), "none".to_string());
-                m.insert(
-                    "leon_logo_center_x".to_string(),
-                    (self.width / 2).to_string(),
-                );
-                m.insert(
-                    "leon_logo_center_y".to_string(),
-                    (self.height / 2).to_string(),
-                );
-            }
-        }
-        m.insert("leon_bgrt_status".to_string(), self.bgrt_status.to_string());
-        m.insert("leon_bgrt_type".to_string(), self.bgrt_type.to_string());
-        m
     }
 
     pub fn logo_text(&self) -> String {
@@ -192,18 +144,14 @@ impl Geometry {
     }
 
     pub fn report(&self) -> String {
-        let mut s = format!(
+        format!(
             "framebuffer: {}x{} (stride {}, format {})\nlogo: {}",
             self.width,
             self.height,
             self.stride,
             self.format,
             self.logo_text()
-        );
-        if let Some(w) = &self.logo_warning {
-            s.push_str(&format!("\nwarning: {w}"));
-        }
-        s
+        )
     }
 }
 
@@ -296,7 +244,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn geometry_context_has_fb_keys() {
+    fn geometry_from_dump_fields() {
         let json = r#"{
             "framebuffer": { "width": 1366, "height": 768, "stride": 5504, "format": "Bgrx" },
             "bgrt": null
@@ -305,13 +253,13 @@ mod tests {
         std::fs::write(&path, json).unwrap();
         let g = Geometry::from_dump(&path).unwrap();
         let _ = std::fs::remove_file(&path);
-        let ctx = g.context();
-        assert_eq!(ctx.get("leon_fb_width").map(|s| s.as_str()), Some("1366"));
-        assert_eq!(ctx.get("leon_fb_stride").map(|s| s.as_str()), Some("5504"));
-        assert_eq!(ctx.get("leon_fb_format").map(|s| s.as_str()), Some("Bgrx"));
-        assert_eq!(ctx.get("leon_bgrt_rect").map(|s| s.as_str()), Some("none"));
-        assert_eq!(ctx.get("leon_bgrt_status").map(|s| s.as_str()), Some("0"));
-        assert_eq!(ctx.get("leon_bgrt_type").map(|s| s.as_str()), Some("0"));
+        assert_eq!((g.width, g.height, g.stride), (1366, 768, 5504));
+        assert_eq!(g.format, "Bgrx");
+        assert_eq!(g.logo_text(), "no BGRT logo");
+        assert!(
+            g.report()
+                .starts_with("framebuffer: 1366x768 (stride 5504, format Bgrx)")
+        );
     }
 
     #[test]
@@ -345,11 +293,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(g.width, 3840);
         assert_eq!(g.stride, 3840);
-        let ctx = g.context();
         assert_eq!(
-            ctx.get("leon_bgrt_rect").map(|s| s.as_str()),
-            Some("1472,880,2368,1280")
+            g.logo_text(),
+            "BGRT logo 896x400 at (1472,880) [status 1 type 0]"
         );
-        assert_eq!(ctx.get("leon_bgrt_status").map(|s| s.as_str()), Some("1"));
     }
 }
