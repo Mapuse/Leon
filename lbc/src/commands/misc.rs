@@ -8,15 +8,14 @@ use crate::boot_config;
 use lbt::discovery;
 use lbt::geometry::Geometry;
 
-/// The boot-manager keymap (mirrors `lbc tui` and the on-screen help).
+/// The menuconfig keymap (mirrors `lbm`, the Leon boot-config editor).
 pub fn keymap_show() -> Result<()> {
-    println!("Leon boot-manager keymap");
-    println!("  ↑ / ↓ / j / k   move selection");
-    println!("  Enter            boot the selected entry");
-    println!("  Esc              cancel / quit");
-    println!("  r                refresh entries");
-    println!("  ?                toggle help");
-    println!("  s                system info");
+    println!("Leon menuconfig keymap (lbm)");
+    println!("  ↑ / ↓             move selection");
+    println!("  Enter             select / toggle");
+    println!("  Esc               back / cancel");
+    println!("  Ctrl+S            save config");
+    println!("  Ctrl+Q            quit");
     Ok(())
 }
 

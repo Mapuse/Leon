@@ -1,0 +1,22 @@
+[package]
+name = "lbm"
+version = "0.7.0"
+edition = "2024"
+description = "menuconfig-style TUI for Leon's boot.toml"
+license = "MIT"
+
+[[bin]]
+name = "lbm"
+path = "src/main.rs"
+
+[dependencies]
+# crossterm-backend keeps this pure-Rust, matching lbt/lbc's own choice
+# (no ncurses/pancurses C dependency needed).
+cursive = { version = "0.20", default-features = false, features = ["crossterm-backend"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+dirs = "5"
+
+[dev-dependencies]
+leon-common = { path = "../common" }

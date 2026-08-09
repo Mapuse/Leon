@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "common", "lbt", "lbc"]
+members = [".", "common", "lbt", "lbc", "lbm"]
 default-members = [".", "common"]
 
 [package]

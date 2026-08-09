@@ -38,9 +38,9 @@ custom_target('lbl-kernel.efi',
   output : 'lbl-kernel.efi',
 )
 
-# lbt — host-side build tool (boot-manager TUI + boot config). Built for the
-# ecosystem target (`*-unknown-linux-musl`); pure Rust (ratatui/crossterm), no
-# embedded Python/cps.
+# lbt — host-side build tool (discovery, image builders, geometry). Built for
+# the ecosystem target (`*-unknown-linux-musl`); pure Rust, no embedded
+# Python/cps.
 custom_target('lbt',
   build_by_default : true,
   build_always_stale : true,
@@ -52,4 +52,32 @@ custom_target('lbt',
     .format(build_dir / 'lbt', src_dir),
   ],
   output : 'lbt',
+)
+
+# lbc — host-side boot config + boot control (config set/get, ESP staging).
+custom_target('lbc',
+  build_by_default : true,
+  build_always_stale : true,
+  install : true,
+  install_dir : get_option('bindir'),
+  command : ['sh', '-c',
+    'case $$(uname -m) in x86_64) T=x86_64-unknown-linux-musl;; aarch64) T=aarch64-unknown-linux-musl;; *) echo "unsupported: $$(uname -m)"; exit 1;; esac; '
+    'CARGO_TARGET_DIR={0} cargo build --release --locked --target $$T --manifest-path {1}/lbc/Cargo.toml && cp {0}/$$T/release/lbc @OUTPUT@'
+    .format(build_dir / 'lbc', src_dir),
+  ],
+  output : 'lbc',
+)
+
+# lbm — host-side menuconfig editor for boot.toml (cursive/crossterm).
+custom_target('lbm',
+  build_by_default : true,
+  build_always_stale : true,
+  install : true,
+  install_dir : get_option('bindir'),
+  command : ['sh', '-c',
+    'case $$(uname -m) in x86_64) T=x86_64-unknown-linux-musl;; aarch64) T=aarch64-unknown-linux-musl;; *) echo "unsupported: $$(uname -m)"; exit 1;; esac; '
+    'CARGO_TARGET_DIR={0} cargo build --release --locked --target $$T --manifest-path {1}/lbm/Cargo.toml && cp {0}/$$T/release/lbm @OUTPUT@'
+    .format(build_dir / 'lbm', src_dir),
+  ],
+  output : 'lbm',
 )

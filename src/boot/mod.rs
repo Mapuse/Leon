@@ -18,9 +18,6 @@ use uefi::Result;
 use uefi::boot::{self, image_handle};
 use uefi::fs::FileSystem;
 
-#[cfg(feature = "gop-ui")]
-use crate::ui::GopRenderer;
-
 use entries::Entry;
 
 /// Runs one boot and returns the UEFI status to report to the firmware.
@@ -32,15 +29,21 @@ pub fn run() -> Result<()> {
     let bgrt = crate::firmware::bgrt::find();
 
     // Read + validate the boot configuration (`\EFI\leon\boot.toml`, written
-    // by `lbc config set`). A missing or broken file simply yields defaults.
-    let boot_config = config::read();
+    // by `lbc config set` or the on-device menuconfig). A missing or broken
+    // file simply yields defaults.
+    let mut boot_config = config::read();
+
+    // Keep the boot-volume filesystem alive: the menuconfig edits the config
+    // in place and persists it back to `boot.toml` on every committed change.
+    let mut fs = boot::get_image_file_system(image_handle())
+        .map(FileSystem::new)
+        .ok();
 
     // Discover every boot entry on the ESP and persist it (best-effort).
     let mut entries: Vec<Entry> = Vec::new();
-    if let Ok(protocol) = boot::get_image_file_system(image_handle()) {
-        let mut fs = FileSystem::new(protocol);
-        entries = entries::discover(&mut fs);
-        entries::write_entries_file(&mut fs, &boot_config, &entries);
+    if let Some(fs) = fs.as_mut() {
+        entries = entries::discover(fs);
+        entries::write_entries_file(fs, &boot_config, &entries);
     }
 
     // Persist the real boot geometry for host tooling (`lbt`). Best-effort.
@@ -54,47 +57,12 @@ pub fn run() -> Result<()> {
         crate::log_error!("boot: {warn}");
     }
 
-    #[cfg(feature = "gop-ui")]
-    {
-        use uefi::proto::console::text::Output;
-        use uefi::system;
-
-        // Scaffold only: overlay placeholder text without clearing the frame
-        // buffer. The framebuffer must never be filled here — the firmware
-        // logo is still on screen and the flicker-free guarantee forbids
-        // destroying it (that is also why `set_mode` is never called).
-        if let Ok(_renderer) = GopRenderer::capture() {
-            if let Ok(Some(mut stdout)) = system::with_stdout(|out| Ok(out.clone())) {
-                GopRenderer::console_text(&mut stdout, 1, 1, "Leon UEFI GOP UI placeholder");
-                GopRenderer::console_text(
-                    &mut stdout,
-                    1,
-                    2,
-                    "Press Enter to continue to the text menu",
-                );
-                let _ = stdout.set_cursor_position(0, 4);
-            }
-        }
-    }
-    // A `ui::GopRenderer` scaffold exists in `src/ui` and may be used to port
-    // the host boot-manager menu layout into the bootloader in future work. It
-    // must keep the "query, don't touch" rule: never `set_mode`, never fill
-    // the whole frame buffer, so the firmware logo survives every handoff.
-
-    // Pick the entry to boot: the menu choice if the splash menu was shown,
-    // otherwise `default_entry`, otherwise the first discovery.
+    // Pick the entry to boot: the menuconfig choice if the splash menu was
+    // shown, otherwise `default_entry`, otherwise the first discovery.
     let chosen = if boot_config.splash == Some(true) {
-        menu::run(&boot_config, &entries, secure_boot)
+        menu::run(fs.as_mut(), &mut boot_config, &entries, secure_boot)
     } else {
-        boot_config
-            .default_entry
-            .as_deref()
-            .and_then(|want| {
-                entries
-                    .iter()
-                    .position(|e| entries::cstr_lossy(e.label.as_ref()).eq(want))
-            })
-            .unwrap_or(0)
+        menu::default_index(&boot_config, &entries)
     };
     let Some(entry) = entries.get(chosen) else {
         crate::log_error!("boot: no boot entries discovered on the ESP");

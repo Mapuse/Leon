@@ -61,7 +61,7 @@ The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**
 - EFI-stub kernel — `lbl-kernel` is a plain UEFI application that acquires GOP + BGRT itself and never receives a handoff blob
 - Shared ABI — `common/` is the single source of truth for the pixel formats, frame buffer geometry, BGRT metadata, and the `boot.toml` parser
 - Ultra-silent logging — errors go to `\var\logs\leon\log.md` (capped at 64 KiB), nothing ever touches the screen
-- `lbt` build tool — discover ESPs and boot entries, run the keyboard-driven boot-manager TUI (a pure-Rust ratatui app), manage the boot config (no embedded Python/`cps`)
+- `lbt` build tool — discover ESPs and build bootable images, plus the `lbm` menuconfig editor and `lbc` boot config/control companions (all pure Rust, no embedded Python/`cps`)
 - Dual architecture — amd64 and arm64 from a single host
 - Five build front-ends — Make, Ninja, Meson, Cargo, and a CMake toolchain, all with auto-detected architecture
 
@@ -118,7 +118,9 @@ The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**
 | Shared ABI | `common/src/geometry.rs` | `Framebuffer` / `Bgrt` / `PixelFormat` structs |
 | Boot config parser | `common/src/boot_config.rs` | `no_std` parser for `boot.toml`, shared with `lbt` |
 | Kernel | `kernel/src/{gop,bgrt,memmap,marker,main}.rs` | EFI-stub kernel — self-acquires GOP + BGRT, EBS, marker, halt |
-| Build tool | `lbt/` | Host tool — ESP/boot-entry discovery, the boot-manager TUI, boot config |
+| Build tool | `lbt/` | Host tool — ESP/boot-entry discovery, image builders, geometry |
+| Config + boot control | `lbc/` | Host tool — `boot.toml` management (`config set`/`get`/…), ESP staging |
+| Menuconfig editor | `lbm/` | Host TUI — menuconfig-style editor for `boot.toml` |
 
 ---
 
@@ -278,7 +280,7 @@ Chainloading is done with the standard UEFI protocol — no manual PE loading:
 4. StartImage — the loaded image runs, the screen is never touched
 ```
 
-Because the entries file is written every boot, `lbt discover` and the boot-manager TUI always see what this firmware actually exposes. The kernel at `\EFI\leon\kernel.efi` is just one of those entries.
+Because the entries file is written every boot, `lbt discover` and the `lbm` entry picker always see what this firmware actually exposes. The kernel at `\EFI\leon\kernel.efi` is just one of those entries.
 
 ---
 
@@ -359,6 +361,19 @@ make sign
 make qemu
 ```
 
+To preview and drive the menuconfig TUI by hand instead of watching it
+auto-boot away, hold it on screen with a long countdown:
+
+```sh
+make qemu-preview          # menu stays up ~5 minutes; Esc disarms it
+MENU_TIMEOUT=30 make qemu  # or pick your own hold in seconds
+```
+
+`qemu-preview` rewrites the staged `boot.toml` timeout before booting (the
+next `make stage` restores the default). In the QEMU window the arrow keys
+move the selection, Enter selects/boots, and Esc pauses the countdown;
+`Ctrl-A` then `c` switches to the QEMU monitor (`Ctrl-A` then `x` quits).
+
 On real hardware the bootloader must use the UEFI-canonical removable-media name — `BOOTX64.EFI` on amd64, `BOOTAA64.EFI` on arm64 — so it is found automatically by the firmware. The kernel lives at `EFI/leon/kernel.efi` and is discovered as a regular boot entry; every other entry on the ESP is chainloadable too.
 
 For Secure Boot, generate a personal key set, enroll the `.esl` files in the firmware, and sign the staged tree — full instructions in `docs/secure-boot.md` (`scripts/sign.sh setup`, then `make sign` after every rebuild).
@@ -378,15 +393,17 @@ The bootloader reads its configuration from `EFI/leon/boot.toml` on the same vol
 |----------|--------------|-------------|
 | `target/<uefi-target>/release/lbl.efi` | amd64 / arm64 | Chainloading bootloader PE32+ image |
 | `kernel/target/<uefi-target>/release/lbl-kernel.efi` | amd64 / arm64 | EFI-stub kernel PE32+ image |
-| `target/<musl-target>/release/lbt` | host | Build tool (`make lbt`) — discovery, boot-manager TUI, boot config |
+| `target/<musl-target>/release/lbt` | host | Build tool (`make lbt`) — discovery, image builders, geometry |
+| `target/<musl-target>/release/lbc` | host | Config + boot control (`make lbc`) — `config set/get`, ESP staging |
+| `target/<musl-target>/release/lbm` | host | Menuconfig editor (`make lbm`) — menuconfig TUI for `boot.toml` |
 | `build/esp/EFI/BOOT/BOOTX64.EFI` | amd64 | Staged, UEFI-canonical boot file |
 | `build/esp/EFI/BOOT/BOOTAA64.EFI` | arm64 | Staged, UEFI-canonical boot file |
 | `build/esp/EFI/leon/kernel.efi` | both | Kernel as a discovered boot entry |
 | `build/leon-esp.img` | both | GPT ESP image with an ESP partition (`make esp`) |
 
-`lbt` is a std (host) binary built for the ecosystem target (`x86_64`/`aarch64`-`unknown-linux-musl`) and lives outside the ESP: `make stage`, `make esp`, and `make qemu` build only the bootloader + kernel and never need it (or its transitive dependencies).
+`lbt`, `lbc`, and `lbm` are std (host) binaries built for the ecosystem target (`x86_64`/`aarch64`-`unknown-linux-musl`) and live outside the ESP: `make stage`, `make esp`, and `make qemu` build only the bootloader + kernel and never need them (or their transitive dependencies).
 
-`lbc` ships the keyboard-driven boot-manager TUI (`lbc tui`); `lbt` builds the images — a pure-Rust ratatui/crossterm app, no embedded Python. It receives live framebuffer + BGRT geometry, discovered boot entries, and the boot config, and uses the full keymap (arrows/`hjkl`, PgUp/PgDn, Home/End, `1-9`/`0`, `/` search with `n`/`N` and `p` un-filter, `d` detail panel, `h` help, `r` refresh, `Enter`/space/`s` boot preview, `q`/Esc/Ctrl+C quit).
+`lbm` is the menuconfig-style TUI for editing the boot config — `lbm ~/.config/leon/boot.toml` (optionally followed by the bootloader's `entries.jsonc` to fill the entry picker). It is a pure-Rust `cursive`/crossterm app (no ncurses, no embedded Python), themed strict black-and-white, editing exactly the keys the bootloader parses (`timeout`, `splash`, `default_entry`, `theme`, `entries_file`). `lbc` and `lbt` remain the non-interactive config/staging and build tools.
 
 **Release profile:**
 
@@ -426,18 +443,20 @@ rustup target add x86_64-unknown-linux-musl   # host `lbt`
 rustup target add aarch64-unknown-linux-musl  # host `lbt`
 ```
 
-The bootloader and kernel are UEFI applications (`*-unknown-uefi`); the host tool `lbt` follows the ecosystem convention (`*-unknown-linux-musl`, `/system` prefix, clang/llvm). `lbt` is pure Rust (ratatui/crossterm) and has no Python/pyo3 dependency.
+The bootloader and kernel are UEFI applications (`*-unknown-uefi`); the host tools (`lbt`, `lbc`, `lbm`) follow the ecosystem convention (`*-unknown-linux-musl`, `/system` prefix, clang/llvm). They are pure Rust and have no Python/pyo3 dependency.
 
 ### Make
 
 ```sh
-make build                    # bootloader + kernel + lbt, auto arch
+make build                    # bootloader + kernel + lbt + lbc + lbm, auto arch
 make lbt                      # lbt only (host, musl target)
+make lbc                      # lbc only (host, musl target)
+make lbm                      # lbm only (host, musl target)
 make stage                    # ESP tree at build/esp (bootloader + kernel only, or DESTDIR=/mnt/esp)
 make install DESTDIR=/mnt/esp # staged install onto a mounted ESP
 make ARCH=arm64 build         # cross-build for arm64
 make test                     # generic host tests (workspace, default features)
-make tui-test                 # live local TUI regression suite for lbc
+make tui-test                 # menuconfig regression suite for lbm
 make clippy                   # lint everything with -D warnings
 make qemu                     # boot under QEMU/OVMF or QEMU/AAVMF
 make esp                      # GPT ESP image (mtools + fdisk/sgdisk)
@@ -445,7 +464,7 @@ make sign                     # stage + sign the ESP tree for Secure Boot
 make clean
 ```
 
-`make build`/`make lbt` compile `lbt` too. `lbt` honors `PROFILE` (default `release`, the same profile the bootloader and kernel build). `make stage`/`install`/`esp`/`qemu` deliberately skip `lbt` and only produce the ESP tree.
+`make build`/`make lbt|lbc|lbm` compile the host tools too. `lbt`/`lbc`/`lbm` honor `PROFILE` (default `release`, the same profile the bootloader and kernel build). `make stage`/`install`/`esp`/`qemu` deliberately skip the host tools and only produce the ESP tree.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -537,22 +556,23 @@ cargo clippy --all-targets --target x86_64-unknown-uefi -- -D warnings
 cargo clippy --all-targets --target aarch64-unknown-uefi -- -D warnings
 
 # Host-side unit tests
-cargo test -p lbt            # CLI, discovery, geometry, TUI, boot-config parity
+cargo test -p lbt            # CLI, discovery, geometry, boot-config parity
+cargo test -p lbm            # menuconfig round-trip + bootloader-parser parity
 cargo test -p leon-common    # the shared no_std boot.toml parser
-cargo test -p lbc --test tui_full -- --nocapture
-make tui-test                 # local PTY-driven `lbc tui` regression suite
+cargo test -p lbc
+make tui-test                 # lbm menuconfig regression suite
 
 # Format check
 cargo fmt --check
 ```
 
-The `lbc` test suite includes a parity test that feeds everything `lbc config set` serializes through the bootloader's own `leon_common::boot_config` parser, so the host-written file and the loader's reader can never drift apart — including the single-quoted TOML literal strings the serializer emits for backslash-heavy paths like `\EFI\leon\entries.jsonc`.
+The `lbc` and `lbm` test suites include a parity test that feeds everything `lbc config set`/`lbm` serializes through the bootloader's own `leon_common::boot_config` parser, so the host-written file and the loader's reader can never drift apart — including the single-quoted TOML literal strings the serializer emits for backslash-heavy paths like `\EFI\leon\entries.jsonc`.
 
 **Runtime verification:**
 
 | Method | Command | What it verifies |
 |--------|---------|------------------|
-| Live TUI | `make tui-test` | Local PTY-driven `lbc tui` keymap and menu regression suite |
+| Menuconfig editor | `make tui-test` | `lbm` boot-config round-trip and bootloader-parser parity |
 | QEMU/OVMF | `make qemu` | Silent chainload to the kernel marker under emulation |
 | QEMU/AAVMF | `make ARCH=arm64 qemu` | The same on arm64 |
 | QEMU Secure Boot | `make esp` + snakeoil-signed images (`docs/secure-boot.md`) | Menu warning, signed-kernel boot, unsigned-kernel `ACCESS_DENIED` reporting |
@@ -579,14 +599,23 @@ Leon/
 │       ├── geometry.rs     # Framebuffer / Bgrt / PixelFormat shared ABI
 │       └── boot_config.rs  # Shared no_std parser for \EFI\leon\boot.toml
 ├── lbt/
-│   ├── Cargo.toml          # Leon Build Tool (host, std; ratatui + crossterm)
+│   ├── Cargo.toml          # Leon Build Tool (host, std; pure Rust)
 │   └── src/
-│       ├── main.rs         # Slim entry: clap -> Command dispatch
-│       ├── cli.rs          # info / discover / tui / config
+│       ├── main.rs         # Slim entry: CLI dispatch
+│       ├── cli/            # Command tree + argument parsing
 │       ├── discovery.rs    # ESP + boot-entry discovery (lsblk / mount table)
 │       ├── geometry.rs     # Geometry + sysfs/BMP/dump parsing (host mirror)
+│       └── commands/       # info / discover / build / image builders
+├── lbc/
+│   ├── Cargo.toml          # Leon Boot Configuration (host, std)
+│   └── src/
+│       ├── main.rs         # Slim entry: CLI dispatch
+│       ├── cli/            # Command tree + argument parsing
 │       ├── boot_config.rs  # Host boot.toml model + sync to mounted ESPs
-│       └── commands/       # info / discover / tui (ratatui menu) / config
+│       └── commands/       # config set/get, stage, boot control
+├── lbm/
+│   ├── Cargo.toml          # Leon Boot Menuconfig (host TUI, cursive/crossterm)
+│   └── src/main.rs         # menuconfig editor for boot.toml
 ├── src/
 │   ├── main.rs             # Module wiring + uefi_main
 │   ├── boot/
@@ -646,10 +675,10 @@ Leon/
 |-------|---------|---------|
 | `uefi` | 0.39 | Boot services, GOP, config tables, Simple File System, `LoadImage`/`StartImage`, global allocator (bootloader + kernel) |
 | `leon-common` | 0.7.0 | Shared `Framebuffer`/`Bgrt`/`PixelFormat` ABI + the `boot.toml` parser (workspace) |
-| `ratatui` / `crossterm` | — | The `lbt` boot-manager TUI (pure Rust, no embedded Python) |
-| `clap` / `anyhow` / `toml` / `serde_json` | — | `lbt` CLI, config serialization, and JSON output |
+| `cursive` / `crossterm` | — | The `lbm` menuconfig editor (pure Rust, no ncurses/embedded Python) |
+| `anyhow` / `toml` / `serde_json` | — | Host-tool CLI, config serialization, and JSON output |
 
-The bootloader depends only on `uefi` and `leon-common`. The kernel depends on `uefi` and `leon-common` (`default-features = false`, keeping the `boot.toml` parser which needs `alloc` out of its code). `lbt` is a std host binary with no optional features.
+The bootloader depends only on `uefi` and `leon-common`. The kernel depends on `uefi` and `leon-common` (`default-features = false`, keeping the `boot.toml` parser which needs `alloc` out of its code). `lbt`/`lbc`/`lbm` are std host binaries with no optional features.
 
 ---
 

@@ -55,6 +55,20 @@ if [ ! -f "$VARS_CACHE" ] || [ "$(stat -c %s "$VARS_CACHE" 2>/dev/null)" != "$(s
     cp "$OVMF_VARS" "$VARS_CACHE"
 fi
 
+# Optional menuconfig preview: MENU_TIMEOUT=<seconds> rewrites the staged
+# boot.toml so the boot-manager countdown runs for that long, holding the TUI
+# on screen instead of auto-booting. `make qemu-preview` sets a long timeout
+# for exactly this. The staged tree is a generated artifact, so patching it
+# in place is safe; the next `make stage` restores the default.
+if [ -n "${MENU_TIMEOUT:-}" ]; then
+    if [ -f "build/esp/EFI/leon/boot.toml" ]; then
+        sed -i -E "s/^timeout = [0-9]+/timeout = ${MENU_TIMEOUT}/" build/esp/EFI/leon/boot.toml
+    else
+        echo "run_qemu.sh: MENU_TIMEOUT set but build/esp/EFI/leon/boot.toml not found (run 'make stage' first)." >&2
+        exit 1
+    fi
+fi
+
 exec "$QEMU_BIN" \
     $MACHINE \
     $CPU \

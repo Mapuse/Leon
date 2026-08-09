@@ -98,7 +98,6 @@ pub enum Handler {
     ProfileList,
     ProfileLoad,
     ProfileDelete,
-    Tui,
     KeymapShow,
     Version,
     HelpAll,
@@ -244,17 +243,6 @@ mod list_tree {
     ];
 }
 
-// ── menu subtree ────────────────────────────────────────────────────────────
-mod menu_tree {
-    use super::*;
-
-    pub const MENU: &[Node] = &[
-        Node { name: "run", doc: "Run the boot-manager TUI", aliases: &["r", "start", "open", "launch"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::Tui) },
-        Node { name: "preview", doc: "Preview the boot-manager TUI", aliases: &["p", "show", "render", "peek"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::Tui) },
-        Node { name: "keys", doc: "Print the keymap", aliases: &["k", "keymap", "shortcuts", "controls"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::KeymapShow) },
-    ];
-}
-
 // ── names subtree ───────────────────────────────────────────────────────────
 mod names_tree {
     use super::*;
@@ -318,14 +306,12 @@ pub static ROOT: Node = Node {
         Node { name: "j", doc: "JSON output helpers", aliases: &["json", "jq", "machine"], flags: NO_FLAGS, kind: Kind::Ns(json_tree::JSON) },
         Node { name: "k", doc: "Boot-manager keymap", aliases: &["keymap", "keys", "kb", "shortcuts"], flags: NO_FLAGS, kind: Kind::Ns(keymap_tree::KEYMAP) },
         Node { name: "l", doc: "List helpers", aliases: &["list", "ls", "enumerate"], flags: NO_FLAGS, kind: Kind::Ns(list_tree::LIST) },
-        Node { name: "m", doc: "Boot-manager menu", aliases: &["menu", "ui", "mgr"], flags: NO_FLAGS, kind: Kind::Ns(menu_tree::MENU) },
         Node { name: "n", doc: "Boot entry names", aliases: &["names", "labels", "titles"], flags: NO_FLAGS, kind: Kind::Ns(names_tree::NAMES) },
         Node { name: "o", doc: "One-shot boot", aliases: &["once", "one", "single"], flags: NO_FLAGS, kind: Kind::Ns(once_tree::ONCE) },
         Node { name: "p", doc: "Boot config profiles", aliases: &["profile", "prof", "cfgprof"], flags: NO_FLAGS, kind: Kind::Ns(profile_tree::PROFILE) },
         Node { name: "q", doc: "Queries", aliases: &["query", "qry", "ask", "inspect"], flags: NO_FLAGS, kind: Kind::Ns(query_tree::QUERY) },
         Node { name: "r", doc: "Reset the boot config to defaults", aliases: &["reset", "wipe", "clear", "revert"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::ConfigReset) },
         Node { name: "s", doc: "Stage the ESP tree", aliases: &["stage", "stg", "deploy", "prep"], flags: &[F_DEST, F_ARCH], kind: Kind::Leaf(Handler::Stage) },
-        Node { name: "t", doc: "Run the boot-manager TUI", aliases: &["tui", "menu", "manager"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::Tui) },
         Node { name: "u", doc: "Upload the boot config to an ESP", aliases: &["upload", "sync", "push", "up"], flags: &[F_VOL], kind: Kind::Leaf(Handler::EspSync) },
         Node { name: "v", doc: "Version", aliases: &["version", "ver", "rel", "ver2"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::Version) },
         Node { name: "w", doc: "Write a boot config key", aliases: &["write", "put", "set", "edit"], flags: &[F_KEY, F_VALUE], kind: Kind::Leaf(Handler::ConfigSet) },
@@ -346,14 +332,12 @@ pub static ROOT: Node = Node {
         Node { name: "J", doc: "JSON (uppercase)", aliases: &["Json2", "jq2"], flags: NO_FLAGS, kind: Kind::Ns(json_tree::JSON) },
         Node { name: "K", doc: "Keymap (uppercase)", aliases: &["Keys2", "kb2"], flags: NO_FLAGS, kind: Kind::Ns(keymap_tree::KEYMAP) },
         Node { name: "L", doc: "List (uppercase)", aliases: &["List2", "ls2"], flags: NO_FLAGS, kind: Kind::Ns(list_tree::LIST) },
-        Node { name: "M", doc: "Menu (uppercase)", aliases: &["Menu2", "mgr2"], flags: NO_FLAGS, kind: Kind::Ns(menu_tree::MENU) },
         Node { name: "N", doc: "Names (uppercase)", aliases: &["Names2", "labels2"], flags: NO_FLAGS, kind: Kind::Ns(names_tree::NAMES) },
         Node { name: "O", doc: "One-shot boot (uppercase)", aliases: &["Once2", "single2"], flags: NO_FLAGS, kind: Kind::Ns(once_tree::ONCE) },
         Node { name: "P", doc: "Profiles (uppercase)", aliases: &["Profile", "prof2"], flags: NO_FLAGS, kind: Kind::Ns(profile_tree::PROFILE) },
         Node { name: "Q", doc: "Queries (uppercase)", aliases: &["Query", "qry2"], flags: NO_FLAGS, kind: Kind::Ns(query_tree::QUERY) },
         Node { name: "R", doc: "Reset (uppercase)", aliases: &["Reset2", "wipe2"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::ConfigReset) },
         Node { name: "S", doc: "Stage (uppercase)", aliases: &["Stage2", "stg2"], flags: &[F_DEST, F_ARCH], kind: Kind::Leaf(Handler::Stage) },
-        Node { name: "T", doc: "TUI (uppercase)", aliases: &["Tui2", "Menu2"], flags: NO_FLAGS, kind: Kind::Ns(menu_tree::MENU) },
         Node { name: "U", doc: "Upload (uppercase)", aliases: &["Upload2", "sync2"], flags: &[F_VOL], kind: Kind::Leaf(Handler::EspSync) },
         Node { name: "V", doc: "Version (uppercase)", aliases: &["Ver2", "v2"], flags: NO_FLAGS, kind: Kind::Leaf(Handler::Version) },
         Node { name: "W", doc: "Write (uppercase)", aliases: &["Write2", "put2"], flags: &[F_KEY, F_VALUE], kind: Kind::Leaf(Handler::ConfigSet) },

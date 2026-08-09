@@ -4,9 +4,6 @@
 lbc \- Leon Boot Configuration: manage the boot config and boot control
 .SH SYNOPSIS
 .B lbc
-.B tui
-.br
-.B lbc
 .B config
 .B get
 .RI [ key ]
@@ -128,54 +125,15 @@ lbc \- Leon Boot Configuration: manage the boot config and boot control
 .SH DESCRIPTION
 .B lbc
 is the boot-configuration and boot-control companion to the Leon bootloader.
-It edits the boot configuration consumed by the bootloader, runs the
-full-screen keyboard-driven boot-manager menu (a pure-Rust ratatui app, no
-embedded Python), stages the ESP tree, and reports the boot volume layout.
+It edits the boot configuration consumed by the bootloader, stages the ESP
+tree, and reports the boot volume layout.
 It reuses the shared host-side discovery and geometry modules from the
 .B lbt
 library; the image builders remain in
-.BR lbt (1).
-.PP
-The `lbc tui` menu mirrors the bootloader's runtime experience by exporting
-live framebuffer + BGRT geometry and discovered boot entries to environment
-variables. It also uses the shared boot config and geometry models so host-side
-staging and menu behavior remain consistent with the UEFI boot path.
+.BR lbt (1),
+and the interactive menuconfig-style editor for the boot config lives in
+.BR lbm (1).
 .SH COMMANDS
-.SS tui
-Launch the Leon boot-manager menu: a full-screen, keyboard-driven ratatui app
-that mirrors what the bootloader renders at boot. Before it runs, lbc exports
-the live framebuffer + BGRT geometry, the discovered boot entries, and the boot
-config as
-.I LEON_*
-environment variables
-(\fILEON_FB_WIDTH\fR, \fILEON_FB_HEIGHT\fR, \fILEON_FB_STRIDE\fR,
-\fILEON_FB_FORMAT\fR, \fILEON_BOOT_ENTRIES\fR with one
-\fIlabel<TAB>path\fR per line). Entries normally come from live discovery
-(.efi PE/COFF binaries and EFI-stub ELF kernels on mounted ESPs and under
-`/boot`), or from the entries file written by the bootloader; geometry may be
-absent (no framebuffer) — the menu shows a friendly placeholder state.
-.PP
-The menu uses the full keymap: arrows and
-.I hjkl
-to move, PgUp/PgDn, Home/End, \fI1-9\fR/\fI0\fR to jump to the nth entry,
-.I /
-to search with
-.I n
-/
-.I N
-for next/previous match and
-.I p
-to un-filter,
-.I d
-to toggle the detail panel,
-.I h
-to toggle help,
-.I r
-to refresh, Enter or space or
-.I s
-for a boot preview, and
-.I q
-/ Esc / Ctrl+C to quit.
 .SS config
 .TP
 .B config get \fI[key]\fR
@@ -228,8 +186,7 @@ Report the boot volume layout: host config path, detected ESPs, and the paths
 the bootloader expects on the boot volume.
 .TP
 .B boot once \fIname\fR
-Validate a boot entry and describe how to boot it a single time from the
-boot-manager menu.
+Validate a boot entry and describe how to boot it a single time.
 .TP
 .B boot upload \fR[\fB\-\-vol \fIpath\fR]
 Mirror the boot config onto a mounted ESP (every detected ESP when
@@ -269,7 +226,8 @@ Show BGRT logo geometry.
 .SS keymap
 .TP
 .B keymap show
-Print the boot-manager keymap.
+Print the Leon menuconfig keymap (as used by
+.BR lbm (1)).
 .SS profile
 .TP
 .B profile save \fIprofile\fR
@@ -316,6 +274,7 @@ Saved boot-config profiles managed by
 .SH SEE ALSO
 .BR lbl (1),
 .BR lbt (1),
+.BR lbm (1),
 .BR leon-common (7)
 .SH AUTHOR
 Mapuse

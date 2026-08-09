@@ -18,6 +18,8 @@ use leon_common::boot_config::{self, BootConfig};
 
 /// Boot configuration file, relative to the boot volume root.
 const CONFIG_FILE: &CStr16 = cstr16!(r"\EFI\leon\boot.toml");
+/// Directory that always holds the config file, so it can be created up front.
+const LEON_DIR: &CStr16 = cstr16!(r"\EFI\leon");
 
 /// Parses `\EFI\leon\boot.toml` from the boot volume.
 ///
@@ -45,4 +47,19 @@ pub fn read() -> BootConfig {
         }
         Err(_) => BootConfig::default(),
     }
+}
+
+/// Writes the boot configuration back to `\EFI\leon\boot.toml`.
+///
+/// This is the on-device side of the menuconfig contract: the UEFI menu edits
+/// a [`BootConfig`] in memory and persists it here, using the same serializer
+/// (`leon_common::boot_config::serialize_boot_config`) the host tools' output
+/// is checked against, so whatever the menu writes parses again next boot.
+/// Best-effort: a read-only volume never derails the menu.
+pub fn write(fs: &mut FileSystem, cfg: &BootConfig) {
+    if fs.create_dir_all(Path::new(LEON_DIR)).is_err() {
+        return;
+    }
+    let bytes = boot_config::serialize_boot_config(cfg);
+    let _ = fs.write(Path::new(CONFIG_FILE), bytes.as_bytes());
 }

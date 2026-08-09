@@ -50,11 +50,15 @@ bootable ESP/ISO/IMG images using pure-Rust FAT and GPT writers, builds the
 bootloader, kernel, and itself, manages Secure Boot keys, and inspects the
 host environment, filesystems, boot log, and firmware.
 .PP
-Boot configuration and boot control (the boot-manager menu, staging, the boot
-config) moved to the sibling
+Boot configuration and boot control (staging, the boot config) moved to the
+sibling
 .B lbc
-binary \- see
-.BR lbc (1).
+binary, and the menuconfig-style boot-config editor lives in
+.B lbm
+\- see
+.BR lbc (1)
+and
+.BR lbm (1).
 Everything `lbt` needs for discovery, geometry, and imaging is discovered from
 the live system at run time (\fIlsblk\fR and \fI/sys\fR); nothing is assumed or
 invented.

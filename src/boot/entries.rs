@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use uefi::cstr16;
 use uefi::data_types::CStr16;
 use uefi::fs::{FileSystem, Path};
-use uefi::{CString16, Char16};
+use uefi::CString16;
 
 use leon_common::boot_config::BootConfig;
 
@@ -258,22 +258,4 @@ pub fn cstr_lossy(c: &CStr16) -> String {
         .iter()
         .map(|&u| char::from_u32(u as u32).unwrap_or('?'))
         .collect()
-}
-
-/// Appends a decimal `u32` to a UTF-16 string (menu countdown).
-pub fn push_u32(s: &mut CString16, mut n: u32) {
-    let mut digits = [0u8; 10];
-    let mut i = digits.len();
-    while n > 0 {
-        i -= 1;
-        digits[i] = (n % 10) as u8 + b'0';
-        n /= 10;
-    }
-    if i == digits.len() {
-        s.push(Char16::try_from('0').expect("'0' is a valid Char16"));
-        return;
-    }
-    for &d in &digits[i..] {
-        s.push(Char16::try_from(d as char).expect("ASCII digit is a valid Char16"));
-    }
 }

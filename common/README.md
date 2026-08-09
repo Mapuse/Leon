@@ -67,8 +67,10 @@ the exact same ABI for `Framebuffer`, `Bgrt`, and `boot.toml` semantics to:
 
 - `lbt`, which discovers ESP contents, reads `bootinfo.json`, and writes
   `boot.toml`.
-- `lbc`, which stages EFI trees, runs the live `lbc tui` boot-manager TUI,
-  and exercises the shared parser in regression tests.
+- `lbc`, which stages EFI trees and exercises the shared parser in
+  regression tests.
+- `lbm`, the menuconfig-style editor for `boot.toml`, backed by the same
+  parser.
 
 This shared dependency prevents drift between what the host tools write and
 what the UEFI bootloader reads.

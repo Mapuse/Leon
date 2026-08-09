@@ -1,42 +1,53 @@
-//! Native splash menu.
+//! Menuconfig-style boot menu — the on-device port of `lbm`.
 //!
-//! When `splash = true` in `\EFI\leon\boot.toml`, lbl draws a boxed, colored
-//! menu on the UEFI text console before handing off: a title bar, every boot
-//! entry discovered on the ESP with the selection highlighted, and a status
-//! bar with a live countdown (and a shrinking progress bar). Arrow keys move
-//! the selection (`Home`/`End`/`PgUp`/`PgDn` jump), Enter boots it, and the
-//! countdown auto-boots `default_entry`.
+//! When `splash = true` in `\EFI\leon\boot.toml`, lbl draws a kernel
+//! menuconfig-style menu on the UEFI text console: a boxed list of `[Label]
+//! (value)` rows, navigated with the arrow keys, that edits the very keys
+//! `lbm` edits — `timeout`, `splash`, `theme`, `entries_file`,
+//! `default_entry` — and writes them straight back to `boot.toml` on the ESP.
 //!
-//! The layout is queried from the current text mode every boot, so the frame
-//! is sized and centered for whatever console the firmware provides. All
-//! glyphs come from the standard UEFI font (CP437-derived), and the whole
-//! draw path tolerates firmware that cannot render a glyph.
+//! The layout mirrors `lbm/src/main.rs` row for row: `[Boot Timeout
+//! (seconds)]`, `[Show Boot Menu (splash)]` as a `[*]` toggle, `[Splash
+//! Theme]`, `[Entries File]`, `[Default Boot Entry]`, `[Discovered Boot
+//! Entries]`, and `[Secure Boot Status]`. Enter opens the value editor for a
+//! row (the string/number editors take typed text like `lbm`'s dialogs), the
+//! toggle row flips, the two `--->` rows open their sub-screens, and the first
+//! row — `[Boot Now]` — boots. A live countdown on the status bar auto-boots
+//! `default_entry`; `Esc` pauses it (and backs out of sub-screens).
 //!
-//! Every entry the menu shows — Leon's own kernel included — is a real UEFI
-//! application that gets chainloaded with `LoadImage`/`StartImage` (see
-//! `image`). Nothing is special-cased.
+//! The menu is strictly opt-in and shares the flicker-free rules of the rest
+//! of the loader: it draws only to the text console, never touches the GOP
+//! frame buffer, and with `splash` unset or `false` nothing is drawn at all.
+//! A `timeout` of `0` (or unset) shows the menu for the default 5 seconds.
 //!
-//! The menu is strictly opt-in. With `splash` unset or `false` — or a missing
-//! `boot.toml` — nothing is drawn and the boot stays silent, preserving the
-//! flicker-free guarantee. A `timeout` of `0` (or unset) shows the menu for the
-//! default 5 seconds.
+//! Config edits are serialized with
+//! `leon_common::boot_config::serialize_boot_config` — the exact inverse of
+//! the parser the bootloader runs on every boot — so whatever the menu writes
+//! is guaranteed to parse again next boot. Writing is best-effort: a
+//! read-only volume never derails the menu, and the in-memory config still
+//! drives this boot.
 
 use core::time::Duration;
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use uefi::boot;
 use uefi::cstr16;
-use uefi::proto::console::text::{Color, Key, Output, ScanCode};
+use uefi::fs::FileSystem;
+use uefi::proto::console::text::{Color, Input, Key, Output, ScanCode};
 use uefi::system;
-use uefi::{CStr16, CString16, Char16};
+use uefi::{Char16, CStr16, CString16};
 
 use leon_common::boot_config::BootConfig;
 
 use crate::secure_boot::{self, SecureBootState};
 
-use super::entries::{Entry, cstr_lossy, push_u32};
-use super::serial::{Console as SerialConsole, MenuKey};
+use super::config;
+use super::entries::{cstr_lossy, Entry};
+use super::serial::{Console, MenuKey};
 
 /// Default menu timeout in seconds when `boot.toml` leaves it unset.
 const DEFAULT_TIMEOUT: u32 = 5;
@@ -55,8 +66,6 @@ const UDIV: Char16 = glyph('┤'); // U+2524
 const MARK: Char16 = glyph('►'); // U+25BA
 const SCROLL_UP: Char16 = glyph('▲'); // U+25B2
 const SCROLL_DOWN: Char16 = glyph('▼'); // U+25BC
-const FILL: Char16 = glyph('█'); // U+2588
-const EMPTY: Char16 = glyph('░'); // U+2591
 
 /// Width of the countdown progress bar, in cells.
 const BAR_WIDTH: usize = 12;
@@ -68,9 +77,122 @@ const fn glyph(c: char) -> Char16 {
     unsafe { Char16::from_u16_unchecked(c as u32 as u16) }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Menu structure (mirrors `lbm/src/main.rs`)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The selectable rows of the main menu, in display order. `MainAction` is the
+/// copy of `lbm`'s `MenuAction`, plus the boot rows the loader needs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MainAction {
+    BootNow,
+    ToggleSplash,
+    EditTimeout,
+    EditTheme,
+    EditEntriesFile,
+    EditDefaultEntry,
+    ViewEntries,
+    ViewSecureBoot,
+}
+
+/// Which top-level screen is showing. The value editors are modal sub-loops
+/// ([`edit_text`]) rather than screens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    Main,
+    Entries(EntriesMode),
+    SecureBoot,
+}
+
+/// What Enter does on the entries sub-screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntriesMode {
+    /// Enter boots the highlighted entry (`[Discovered Boot Entries]`).
+    Boot,
+    /// Enter makes the highlighted entry the default (`[Default Boot Entry]`).
+    SetDefault,
+}
+
+/// `lbm`'s `pad_label`: a 34-cell label column, then the value.
+fn pad(label: &str, value: &str) -> String {
+    format!("{label:<34}{value}")
+}
+
+/// The main menu rows, exactly the set `lbm` shows, with the current values
+/// formatted the same way (`(5)`, `[*]`, `--->`, ...).
+fn main_rows(cfg: &BootConfig) -> Vec<(MainAction, String)> {
+    vec![
+        (
+            MainAction::BootNow,
+            pad("[Boot Now]", "--->"),
+        ),
+        (
+            MainAction::EditTimeout,
+            pad(
+                "[Boot Timeout (seconds)]",
+                &format!("({})", cfg.timeout.unwrap_or(DEFAULT_TIMEOUT)),
+            ),
+        ),
+        (
+            MainAction::ToggleSplash,
+            pad(
+                "[Show Boot Menu (splash)]",
+                if cfg.splash.unwrap_or(true) { "[*]" } else { "[ ]" },
+            ),
+        ),
+        (
+            MainAction::EditTheme,
+            pad(
+                "[Splash Theme]",
+                &format!("({})", cfg.theme.as_deref().unwrap_or("default")),
+            ),
+        ),
+        (
+            MainAction::EditEntriesFile,
+            pad(
+                "[Entries File]",
+                cfg.entries_file.as_deref().unwrap_or(r"\EFI\leon\entries.jsonc"),
+            ),
+        ),
+        (
+            MainAction::EditDefaultEntry,
+            pad(
+                "[Default Boot Entry]",
+                &format!("({})", cfg.default_entry.as_deref().unwrap_or("auto")),
+            ),
+        ),
+        (
+            MainAction::ViewEntries,
+            pad("[Discovered Boot Entries]", "--->"),
+        ),
+        (
+            MainAction::ViewSecureBoot,
+            pad("[Secure Boot Status]", "--->"),
+        ),
+    ]
+}
+
+/// The index of the entry `default_entry` names, else the first entry.
+pub fn default_index(cfg: &BootConfig, entries: &[Entry]) -> usize {
+    cfg.default_entry
+        .as_deref()
+        .and_then(|want| {
+            entries
+                .iter()
+                .position(|e| cstr_lossy(e.label.as_ref()).eq(want))
+        })
+        .unwrap_or(0)
+        .min(entries.len() - 1)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Geometry
+// ─────────────────────────────────────────────────────────────────────────
+
 /// Screen-relative geometry of the menu frame, derived from the current text
-/// mode. The box is centered and sized so the title, entries and status bar
-/// always fit, with room for scrolling when there are more entries than rows.
+/// mode. The box is centered and sized so the title, rows and status bar
+/// always fit, with room for scrolling when there are more rows than screen
+/// cells.
 struct Layout {
     cols: usize,
     rows: usize,
@@ -84,9 +206,9 @@ struct Layout {
     top: usize,
     /// Row of the separator under the title.
     header_row: usize,
-    /// Row of the first visible entry.
+    /// Row of the first visible row.
     first_entry_row: usize,
-    /// Number of entry rows that fit on screen.
+    /// Number of rows that fit on screen.
     entry_rows: usize,
     /// Row of the status line.
     status_row: usize,
@@ -125,32 +247,45 @@ impl Layout {
     }
 }
 
-/// Shows the menu (blocking) and returns the index of the entry to boot:
-/// the user's choice, or `default_entry` when the countdown elapses.
+/// Keeps the scroll window pinned to the selection: the selected row never
+/// leaves the visible window.
+fn clamp_scroll(selected: usize, scroll_top: usize, visible: usize) -> usize {
+    if selected < scroll_top {
+        selected
+    } else if selected >= scroll_top + visible {
+        selected + 1 - visible
+    } else {
+        scroll_top
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Rendering
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Shows the menu (blocking) and returns the index of the entry to boot: the
+/// user's choice, `[Boot Now]`, or `default_entry` when the countdown elapses.
 ///
-/// `secure_boot` is the platform's reported Secure Boot state; when it is on,
-/// a warning row is drawn above the bottom border.
-pub fn run(cfg: &BootConfig, entries: &[Entry], secure_boot: SecureBootState) -> usize {
+/// `fs` is the boot-volume filesystem (used to persist config edits to
+/// `boot.toml`; `None` simply means edits are not saved). `cfg` is mutated by
+/// the menu and saved back on every committed edit, so the values shown match
+/// what the next boot reads.
+pub fn run(
+    mut fs: Option<&mut FileSystem>,
+    cfg: &mut BootConfig,
+    entries: &[Entry],
+    secure_boot: SecureBootState,
+) -> usize {
     if entries.is_empty() {
         return 0;
     }
 
     let warn = secure_boot::warning(secure_boot);
     let timeout = cfg.timeout.unwrap_or(DEFAULT_TIMEOUT);
-    let default_idx = cfg
-        .default_entry
-        .as_deref()
-        .and_then(|want| {
-            entries
-                .iter()
-                .position(|e| cstr_lossy(e.label.as_ref()).eq(want))
-        })
-        .unwrap_or(0)
-        .min(entries.len() - 1);
 
     system::with_stdin(|input| {
         system::with_stdout(|out| {
-            let _ = out.set_color(Color::LightGray, Color::Black);
+            let _ = out.set_color(Color::White, Color::Black);
             let _ = out.clear();
             let _ = out.enable_cursor(false);
 
@@ -160,138 +295,308 @@ pub fn run(cfg: &BootConfig, entries: &[Entry], secure_boot: SecureBootState) ->
                 .flatten()
                 .map(|m| (m.columns(), m.rows()))
                 .unwrap_or((80, 25));
-            let layout = Layout::new(cols, rows, entries.len(), warn.is_some());
+            let row_count = main_rows(cfg).len();
+            let layout = Layout::new(cols, rows, row_count.max(entries.len()), warn.is_some());
             let deadline_ms = timeout.saturating_mul(1000);
-            let mut selected = default_idx;
-            let mut prev_selected = selected;
+
+            let mut screen = Screen::Main;
+            let mut selected = 0usize;
             let mut scroll_top = 0usize;
             let mut elapsed_ms = 0u32;
             let mut drawn_second = u32::MAX;
-            let mut dirty_full = true;
-            let mut dirty_rows = false;
-            let mut serial = SerialConsole::open();
             let mut disarmed = false;
+            let mut serial = Console::open();
+            let mut boot_idx = None;
+            let mut dirty = true;
+
             loop {
-                if dirty_full {
-                    let remaining = remaining_seconds(elapsed_ms, deadline_ms);
-                    let frame = Frame {
+                let remaining = remaining_seconds(elapsed_ms, deadline_ms);
+                if dirty || remaining != drawn_second {
+                    let view = View {
+                        cfg: &*cfg,
                         entries,
                         selected,
                         scroll_top,
                         remaining,
                         timeout,
-                        warn,
                         disarmed,
+                        warn,
                     };
-                    draw_all(out, &layout, &frame);
+                    draw_screen(out, &layout, screen, &view);
                     drawn_second = remaining;
-                    prev_selected = selected;
-                    dirty_full = false;
-                } else if dirty_rows {
-                    draw_entry_at(out, &layout, entries, prev_selected, scroll_top, selected);
-                    draw_entry_at(out, &layout, entries, selected, scroll_top, selected);
-                    prev_selected = selected;
-                    dirty_rows = false;
+                    dirty = false;
                 }
-                let remaining = remaining_seconds(elapsed_ms, deadline_ms);
-                if remaining != drawn_second {
-                    drawn_second = remaining;
-                    draw_status(out, &layout, remaining, timeout, disarmed);
-                }
+
                 let mut keys = Vec::new();
                 while let Ok(Some(key)) = input.read_key() {
-                    if let Some(menu_key) = key_from_conin(key) {
-                        keys.push(menu_key);
+                    if let Some(mk) = key_from_conin(key) {
+                        keys.push(mk);
                     }
                 }
                 if let Some(console) = serial.as_mut() {
                     keys.extend(console.poll());
                 }
-                let mut boot_idx = None;
+
                 for key in keys {
-                    match key {
-                        MenuKey::Up if selected > 0 => {
-                            prev_selected = selected;
-                            selected -= 1;
-                            if selected < scroll_top {
-                                scroll_top = selected;
-                                dirty_full = true;
-                            } else {
-                                dirty_rows = true;
+                    match screen {
+                        Screen::Main => match key {
+                            MenuKey::Up | MenuKey::Down => {
+                                let rows = main_rows(cfg).len();
+                                let next = match key {
+                                    MenuKey::Up => selected.saturating_sub(1),
+                                    _ => (selected + 1).min(rows - 1),
+                                };
+                                if next != selected {
+                                    selected = next;
+                                    scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                    dirty = true;
+                                }
+                            }
+                            MenuKey::Home => {
+                                selected = 0;
+                                scroll_top = 0;
+                                dirty = true;
+                            }
+                            MenuKey::End => {
+                                selected = main_rows(cfg).len() - 1;
+                                scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                dirty = true;
+                            }
+                            MenuKey::PageUp => {
+                                selected = selected.saturating_sub(layout.entry_rows);
+                                scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                dirty = true;
+                            }
+                            MenuKey::PageDown => {
+                                selected =
+                                    (selected + layout.entry_rows).min(main_rows(cfg).len() - 1);
+                                scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                dirty = true;
+                            }
+                            MenuKey::Esc => {
+                                if !disarmed {
+                                    disarmed = true;
+                                    dirty = true;
+                                }
+                            }
+                            MenuKey::Enter => {
+                                let action = main_rows(cfg)[selected].0;
+                                match action {
+                                    MainAction::BootNow => {
+                                        boot_idx = Some(default_index(cfg, entries));
+                                    }
+                                    MainAction::ToggleSplash => {
+                                        cfg.splash = Some(!cfg.splash.unwrap_or(true));
+                                        save_config(&mut fs, cfg);
+                                        dirty = true;
+                                    }
+                                    MainAction::EditTimeout => {
+                                        disarmed = true;
+                                        let current = cfg
+                                            .timeout
+                                            .map(|t| t.to_string())
+                                            .unwrap_or_default();
+                                        if let Some(value) = edit_text(
+                                            input,
+                                            out,
+                                            &layout,
+                                            &mut serial,
+                                            &EditSpec {
+                                                title: cstr16!(" Boot Timeout (seconds) "),
+                                                initial: &current,
+                                                validate: is_u32,
+                                                hint: "Whole number of seconds, e.g. 5",
+                                            },
+                                        ) && let Ok(n) = value.parse::<u32>()
+                                        {
+                                            cfg.timeout = Some(n);
+                                            save_config(&mut fs, cfg);
+                                        }
+                                        dirty = true;
+                                        break;
+                                    }
+                                    MainAction::EditTheme => {
+                                        disarmed = true;
+                                        let current = cfg.theme.clone().unwrap_or_default();
+                                        if let Some(value) = edit_text(
+                                            input,
+                                            out,
+                                            &layout,
+                                            &mut serial,
+                                            &EditSpec {
+                                                title: cstr16!(" Splash Theme "),
+                                                initial: &current,
+                                                validate: |_| true,
+                                                hint: "Theme file name; blank resets to default",
+                                            },
+                                        ) {
+                                            cfg.theme = opt_str(value);
+                                            save_config(&mut fs, cfg);
+                                        }
+                                        dirty = true;
+                                        break;
+                                    }
+                                    MainAction::EditEntriesFile => {
+                                        disarmed = true;
+                                        let current = cfg.entries_file.clone().unwrap_or_default();
+                                        if let Some(value) = edit_text(
+                                            input,
+                                            out,
+                                            &layout,
+                                            &mut serial,
+                                            &EditSpec {
+                                                title: cstr16!(" Entries File "),
+                                                initial: &current,
+                                                validate: |_| true,
+                                                hint: r"ESP path, e.g. \EFI\leon\entries.jsonc",
+                                            },
+                                        ) {
+                                            cfg.entries_file = opt_str(value);
+                                            save_config(&mut fs, cfg);
+                                        }
+                                        dirty = true;
+                                        break;
+                                    }
+                                    MainAction::EditDefaultEntry => {
+                                        screen = Screen::Entries(EntriesMode::SetDefault);
+                                        selected = 0;
+                                        scroll_top = 0;
+                                        disarmed = true;
+                                        dirty = true;
+                                        break;
+                                    }
+                                    MainAction::ViewEntries => {
+                                        screen = Screen::Entries(EntriesMode::Boot);
+                                        selected = default_index(cfg, entries);
+                                        scroll_top = clamp_scroll(selected, 0, layout.entry_rows);
+                                        disarmed = true;
+                                        dirty = true;
+                                        break;
+                                    }
+                                    MainAction::ViewSecureBoot => {
+                                        screen = Screen::SecureBoot;
+                                        disarmed = true;
+                                        dirty = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
+                        Screen::Entries(mode) => match key {
+                            MenuKey::Up | MenuKey::Down => {
+                                let count = entries_row_count(entries, mode);
+                                let next = match key {
+                                    MenuKey::Up => selected.saturating_sub(1),
+                                    _ => (selected + 1).min(count - 1),
+                                };
+                                if next != selected {
+                                    selected = next;
+                                    scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                    dirty = true;
+                                }
+                            }
+                            MenuKey::Home => {
+                                selected = 0;
+                                scroll_top = 0;
+                                dirty = true;
+                            }
+                            MenuKey::End => {
+                                selected = entries_row_count(entries, mode) - 1;
+                                scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                dirty = true;
+                            }
+                            MenuKey::PageUp => {
+                                selected = selected.saturating_sub(layout.entry_rows);
+                                scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                dirty = true;
+                            }
+                            MenuKey::PageDown => {
+                                selected = (selected + layout.entry_rows)
+                                    .min(entries_row_count(entries, mode) - 1);
+                                scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                dirty = true;
+                            }
+                            MenuKey::Printable(c) => {
+                                if let Some(n) = digit_value(c).filter(|&n| n < entries.len()) {
+                                    selected = n;
+                                    scroll_top = clamp_scroll(selected, scroll_top, layout.entry_rows);
+                                    dirty = true;
+                                }
+                            }
+                            MenuKey::Enter => {
+                                if selected < entries.len() {
+                                    match mode {
+                                        EntriesMode::Boot => boot_idx = Some(selected),
+                                        EntriesMode::SetDefault => {
+                                            cfg.default_entry = Some(cstr_lossy(
+                                                entries[selected].label.as_ref(),
+                                            ));
+                                            save_config(&mut fs, cfg);
+                                        }
+                                    }
+                                } else {
+                                    // The trailing "Type a custom path..." row.
+                                    disarmed = true;
+                                    let current = cfg.default_entry.clone().unwrap_or_default();
+                                    if let Some(value) = edit_text(
+                                        input,
+                                        out,
+                                        &layout,
+                                        &mut serial,
+                                        &EditSpec {
+                                            title: cstr16!(" Custom Default Entry Path "),
+                                            initial: &current,
+                                            validate: |_| true,
+                                            hint: r"ESP path, e.g. \EFI\leon\kernel.efi",
+                                        },
+                                    ) {
+                                        cfg.default_entry = opt_str(value);
+                                        save_config(&mut fs, cfg);
+                                    }
+                                }
+                                screen = Screen::Main;
+                                selected = 0;
+                                scroll_top = 0;
+                                dirty = true;
+                                break;
+                            }
+                            MenuKey::Esc => {
+                                screen = Screen::Main;
+                                selected = 0;
+                                scroll_top = 0;
+                                dirty = true;
+                                break;
+                            }
+                            _ => {}
+                        },
+                        Screen::SecureBoot => {
+                            if key == MenuKey::Esc {
+                                screen = Screen::Main;
+                                selected = 0;
+                                scroll_top = 0;
+                                dirty = true;
+                                break;
                             }
                         }
-                        MenuKey::Down if selected + 1 < entries.len() => {
-                            prev_selected = selected;
-                            selected += 1;
-                            if selected >= scroll_top + layout.entry_rows {
-                                scroll_top = selected + 1 - layout.entry_rows;
-                                dirty_full = true;
-                            } else {
-                                dirty_rows = true;
-                            }
-                        }
-                        MenuKey::Home if selected > 0 => {
-                            prev_selected = selected;
-                            selected = 0;
-                            scroll_top = 0;
-                            dirty_full = true;
-                        }
-                        MenuKey::End if selected + 1 < entries.len() => {
-                            prev_selected = selected;
-                            selected = entries.len() - 1;
-                            if selected >= scroll_top + layout.entry_rows {
-                                scroll_top = selected + 1 - layout.entry_rows;
-                            }
-                            dirty_full = true;
-                        }
-                        MenuKey::PageUp if selected > 0 => {
-                            prev_selected = selected;
-                            selected = selected.saturating_sub(layout.entry_rows);
-                            if selected < scroll_top {
-                                scroll_top = selected;
-                            }
-                            dirty_full = true;
-                        }
-                        MenuKey::PageDown if selected + 1 < entries.len() => {
-                            prev_selected = selected;
-                            selected = (selected + layout.entry_rows).min(entries.len() - 1);
-                            if selected >= scroll_top + layout.entry_rows {
-                                scroll_top = selected + 1 - layout.entry_rows;
-                            }
-                            dirty_full = true;
-                        }
-                        MenuKey::Jump(n) if n < entries.len() => {
-                            prev_selected = selected;
-                            selected = n;
-                            if selected < scroll_top || selected >= scroll_top + layout.entry_rows {
-                                scroll_top = selected.saturating_sub(layout.entry_rows.saturating_sub(1));
-                                dirty_full = true;
-                            } else {
-                                dirty_rows = true;
-                            }
-                        }
-                        MenuKey::Esc => {
-                            if !disarmed {
-                                disarmed = true;
-                                dirty_full = true;
-                            }
-                        }
-                        MenuKey::Enter => boot_idx = Some(selected),
-                        _ => {}
                     }
                 }
+
                 if let Some(idx) = boot_idx {
-                    let _ = out.set_color(Color::LightGray, Color::Black);
+                    let _ = out.set_color(Color::White, Color::Black);
                     let _ = out.enable_cursor(true);
                     return idx;
                 }
-                if !disarmed && elapsed_ms >= deadline_ms {
-                    let _ = out.set_color(Color::LightGray, Color::Black);
+                if matches!(screen, Screen::Main)
+                    && !disarmed
+                    && elapsed_ms >= deadline_ms
+                {
+                    let _ = out.set_color(Color::White, Color::Black);
                     let _ = out.enable_cursor(true);
-                    return default_idx;
+                    return default_index(cfg, entries);
                 }
                 boot::stall(Duration::from_millis(100));
-                if !disarmed {
+                if matches!(screen, Screen::Main) && !disarmed {
                     elapsed_ms = elapsed_ms.saturating_add(100);
                 }
             }
@@ -299,88 +604,142 @@ pub fn run(cfg: &BootConfig, entries: &[Entry], secure_boot: SecureBootState) ->
     })
 }
 
-/// Immutable per-frame state shared by the render functions.
-struct Frame<'a> {
+/// Number of rows on the entries screen: one per entry, plus the trailing
+/// "type a custom path" row when choosing the default.
+fn entries_row_count(entries: &[Entry], mode: EntriesMode) -> usize {
+    if mode == EntriesMode::SetDefault {
+        entries.len() + 1
+    } else {
+        entries.len()
+    }
+}
+
+/// The text of one entries-screen row.
+fn entry_row_text(entries: &[Entry], idx: usize, mode: EntriesMode) -> String {
+    if idx < entries.len() {
+        cstr_lossy(entries[idx].label.as_ref())
+    } else {
+        let _ = mode;
+        "Type a custom path...".to_string()
+    }
+}
+
+/// The Secure Boot info screen body.
+fn secure_boot_lines(warn: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    match warn {
+        Some(w) => lines.push(w.to_string()),
+        None => lines.push("Secure Boot is off — no image verification.".to_string()),
+    }
+    lines.push(String::new());
+    lines.push("Unsigned entries are rejected by the firmware when".to_string());
+    lines.push("Secure Boot is on (ACCESS_DENIED / SECURITY_VIOLATION).".to_string());
+    lines.push(String::new());
+    lines.push("To sign your staged tree:".to_string());
+    lines.push("  scripts/sign.sh setup, then make sign".to_string());
+    lines
+}
+
+/// Persists config edits to `boot.toml`. Best-effort: no filesystem, or a
+/// read-only volume, just skips the write.
+fn save_config(fs: &mut Option<&mut FileSystem>, cfg: &BootConfig) {
+    if let Some(fs) = fs.as_mut() {
+        config::write(fs, cfg);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Draw helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Everything a screen needs to draw, bundled so the draw path stays small.
+struct View<'a> {
+    cfg: &'a BootConfig,
     entries: &'a [Entry],
     selected: usize,
     scroll_top: usize,
     remaining: u32,
     timeout: u32,
-    warn: Option<&'a str>,
     disarmed: bool,
+    warn: Option<&'a str>,
 }
 
-/// Renders the whole menu frame: borders, title, entries, status, warning and
-/// scroll markers. Call once per repaint; incremental updates repaint only the
-/// rows that changed.
-fn draw_all(out: &mut Output, l: &Layout, f: &Frame) {
-    hline(out, l, l.top, TL, HLINE, TR);
-    draw_title(out, l);
-    hline(out, l, l.header_row, HDIV, HLINE, UDIV);
-    let mut i = 0;
-    while i < l.entry_rows {
-        let idx = f.scroll_top + i;
-        if idx < f.entries.len() {
-            draw_entry(
+fn draw_screen(out: &mut Output, l: &Layout, screen: Screen, v: &View<'_>) {
+    match screen {
+        Screen::Main => {
+            let rows = main_rows(v.cfg);
+            draw_frame(out, l, cstr16!(" Leon Boot Menuconfig "), v.warn);
+            for i in 0..l.entry_rows {
+                let idx = v.scroll_top + i;
+                if idx < rows.len() {
+                    draw_row(out, l, l.first_entry_row + i, &rows[idx].1, idx == v.selected);
+                } else {
+                    clear_row(out, l, l.first_entry_row + i);
+                }
+            }
+            draw_scroll_markers(out, l, v.scroll_top, rows.len());
+            draw_status(
                 out,
                 l,
-                &f.entries[idx],
-                l.first_entry_row + i,
-                idx == f.selected,
+                "↑/↓ move  Enter select  Esc pause",
+                Some(&countdown_text(v.remaining, v.timeout, v.disarmed)),
             );
-        } else {
-            clear_row(out, l, l.first_entry_row + i);
         }
-        i += 1;
+        Screen::Entries(mode) => {
+            let title = match mode {
+                EntriesMode::Boot => cstr16!(" Discovered Boot Entries "),
+                EntriesMode::SetDefault => cstr16!(" Default Boot Entry "),
+            };
+            let row_count = entries_row_count(v.entries, mode);
+            draw_frame(out, l, title, v.warn);
+            for i in 0..l.entry_rows {
+                let idx = v.scroll_top + i;
+                if idx < row_count {
+                    let text = entry_row_text(v.entries, idx, mode);
+                    draw_row(out, l, l.first_entry_row + i, &text, idx == v.selected);
+                } else {
+                    clear_row(out, l, l.first_entry_row + i);
+                }
+            }
+            draw_scroll_markers(out, l, v.scroll_top, row_count);
+            let help = match mode {
+                EntriesMode::Boot => "↑/↓ move  Enter boot  Esc back",
+                EntriesMode::SetDefault => "↑/↓ move  Enter set default  Esc back",
+            };
+            draw_status(out, l, help, None);
+        }
+        Screen::SecureBoot => {
+            draw_frame(out, l, cstr16!(" Secure Boot Status "), v.warn);
+            let lines = secure_boot_lines(v.warn);
+            for i in 0..l.entry_rows {
+                if i < lines.len() {
+                    draw_row(out, l, l.first_entry_row + i, &lines[i], false);
+                } else {
+                    clear_row(out, l, l.first_entry_row + i);
+                }
+            }
+            draw_status(out, l, "Esc: back", None);
+        }
     }
+}
+
+/// Borders, title bar and Secure Boot warning shared by every screen.
+fn draw_frame(out: &mut Output, l: &Layout, title: &CStr16, warn: Option<&str>) {
+    hline(out, l, l.top, TL, HLINE, TR);
+    draw_title(out, l, title);
+    hline(out, l, l.header_row, HDIV, HLINE, UDIV);
     hline(out, l, l.status_row - 1, HDIV, HLINE, UDIV);
-    draw_status(out, l, f.remaining, f.timeout, f.disarmed);
-    if let (Some(row), Some(warn)) = (l.warn_row, f.warn) {
+    if let (Some(row), Some(warn)) = (l.warn_row, warn) {
         draw_warning(out, l, row, warn);
     }
     hline(out, l, l.bottom, BL, HLINE, BR);
-    if f.scroll_top > 0 {
-        write_glyph(out, l, l.frame_left + l.content_w, l.header_row, SCROLL_UP);
-    }
-    if f.scroll_top + l.entry_rows < f.entries.len() {
-        write_glyph(
-            out,
-            l,
-            l.frame_left + l.content_w,
-            l.status_row - 1,
-            SCROLL_DOWN,
-        );
-    }
-    let _ = out.set_color(Color::LightGray, Color::Black);
 }
 
-/// Repaints a single entry row, when `idx` is currently visible.
-fn draw_entry_at(
-    out: &mut Output,
-    l: &Layout,
-    entries: &[Entry],
-    idx: usize,
-    scroll_top: usize,
-    selected: usize,
-) {
-    if idx < scroll_top || idx >= scroll_top + l.entry_rows {
-        return;
-    }
-    draw_entry(
-        out,
-        l,
-        &entries[idx],
-        l.first_entry_row + idx - scroll_top,
-        idx == selected,
-    );
-}
-
-/// The title bar: white on blue, centered in the frame.
-fn draw_title(out: &mut Output, l: &Layout) {
-    let _ = out.set_color(Color::White, Color::Blue);
+/// The title bar, centered in the frame.
+fn draw_title(out: &mut Output, l: &Layout, title: &CStr16) {
+    let _ = out.set_color(Color::White, Color::Black);
     let mut buf = CString16::new();
     buf.push(VLINE);
-    let title = cstr16!(" Leon Boot Manager ");
     let pad = l.content_w.saturating_sub(title.num_chars());
     for _ in 0..(pad / 2) {
         buf.push(SPACE);
@@ -391,57 +750,55 @@ fn draw_title(out: &mut Output, l: &Layout) {
     }
     buf.push(VLINE);
     write_at(out, l, l.frame_left, l.top + 1, buf.as_ref());
-    let _ = out.set_color(Color::LightGray, Color::Black);
+    let _ = out.set_color(Color::White, Color::Black);
 }
 
-/// One entry row. The selected entry is reversed (black on light gray) and
-/// marked with `►`; long labels are truncated with `...` so the highlight
-/// always spans the full row.
-fn draw_entry(out: &mut Output, l: &Layout, entry: &Entry, row: usize, selected: bool) {
+/// One menu row. The selected row is marked with `►` — the highlight the
+/// firmware console supports without attribute games; long rows are
+/// truncated with `...` so the row always spans the full frame width.
+fn draw_row(out: &mut Output, l: &Layout, row: usize, text: &str, selected: bool) {
     if row >= l.rows {
         return;
     }
-    let (fg, bg) = if selected {
-        (Color::Black, Color::LightGray)
-    } else {
-        (Color::LightGray, Color::Black)
-    };
-    let _ = out.set_color(fg, bg);
+    let _ = out.set_color(Color::White, Color::Black);
     let mut buf = CString16::new();
     buf.push(VLINE);
     buf.push(SPACE);
     buf.push(if selected { MARK } else { SPACE });
     buf.push(SPACE);
-    let label = entry.label.as_ref().to_u16_slice();
     let max = l.content_w.saturating_sub(3);
-    let mut added;
-    if label.len() > max {
-        for &u in &label[..max.saturating_sub(3)] {
-            buf.push(Char16::try_from(u).unwrap_or(SPACE));
+    let chars: Vec<char> = text.chars().collect();
+    let mut used = 0;
+    if chars.len() > max {
+        for &c in &chars[..max.saturating_sub(3)] {
+            buf.push(Char16::try_from(c).unwrap_or(SPACE));
+            used += 1;
         }
-        buf.push_str(cstr16!("..."));
-        added = max;
+        for c in "...".chars() {
+            buf.push(Char16::try_from(c).unwrap_or(SPACE));
+            used += 1;
+        }
     } else {
-        for &u in label {
-            buf.push(Char16::try_from(u).unwrap_or(SPACE));
+        for &c in &chars {
+            buf.push(Char16::try_from(c).unwrap_or(SPACE));
+            used += 1;
         }
-        added = label.len();
     }
-    while added < max {
+    while used < max {
         buf.push(SPACE);
-        added += 1;
+        used += 1;
     }
     buf.push(VLINE);
     write_at(out, l, l.frame_left, row, buf.as_ref());
-    let _ = out.set_color(Color::LightGray, Color::Black);
+    let _ = out.set_color(Color::White, Color::Black);
 }
 
-/// Erases an entry row (used when the list is shorter than the frame).
+/// Erases a row (used when a screen has fewer rows than the frame).
 fn clear_row(out: &mut Output, l: &Layout, row: usize) {
     if row >= l.rows {
         return;
     }
-    let _ = out.set_color(Color::LightGray, Color::Black);
+    let _ = out.set_color(Color::White, Color::Black);
     let mut buf = CString16::new();
     buf.push(VLINE);
     for _ in 0..l.content_w {
@@ -451,71 +808,63 @@ fn clear_row(out: &mut Output, l: &Layout, row: usize) {
     write_at(out, l, l.frame_left, row, buf.as_ref());
 }
 
-/// The status bar: navigation help on the left, the countdown plus a
-/// shrinking progress bar on the right. When Esc disarmed the countdown
-/// (`paused`), the right side reads `paused` instead.
-fn draw_status(out: &mut Output, l: &Layout, remaining: u32, timeout: u32, paused: bool) {
-    let _ = out.set_color(Color::LightGray, Color::Black);
-    let help = cstr16!("↑/↓ move   Enter boot   Esc pause");
-    let mut right = CString16::new();
-    let bar = if paused {
-        right.push_str(cstr16!("paused"));
-        CString16::new()
+/// The status bar: help text on the left, optional countdown on the right.
+fn draw_status(out: &mut Output, l: &Layout, left: &str, right: Option<&str>) {
+    let _ = out.set_color(Color::White, Color::Black);
+    let left_c = to_cstring(left);
+    let pad = l.content_w.saturating_sub(left_c.num_chars());
+    let mut seg = CString16::new();
+    seg.push(VLINE);
+    seg.push(SPACE);
+    seg.push_str(left_c.as_ref());
+    for _ in 0..pad {
+        seg.push(SPACE);
+    }
+    write_at(out, l, l.frame_left, l.status_row, seg.as_ref());
+    if let Some(r) = right {
+        let right_c = to_cstring(r);
+        let right_col = (l.frame_left + 1 + l.content_w).saturating_sub(right_c.num_chars());
+        write_at(out, l, right_col, l.status_row, right_c.as_ref());
+    }
+    write_glyph(out, l, l.frame_left + l.frame_w - 1, l.status_row, VLINE);
+    let _ = out.set_color(Color::White, Color::Black);
+}
+
+/// The countdown: `boot in Ns` plus a shrinking progress bar, or `paused`
+/// once `Esc` disarmed it.
+fn countdown_text(remaining: u32, timeout: u32, paused: bool) -> String {
+    let mut right = String::new();
+    if paused {
+        right.push_str("paused");
     } else {
-        right.push_str(cstr16!("boot in "));
-        push_u32(&mut right, remaining);
-        right.push_str(cstr16!("s "));
+        right.push_str("boot in ");
+        right.push_str(&remaining.to_string());
+        right.push_str("s ");
         let filled = if timeout == 0 {
             0
         } else {
             (u64::from(remaining) * BAR_WIDTH as u64 / u64::from(timeout)) as usize
         };
-        let mut b = CString16::new();
         for _ in 0..filled.min(BAR_WIDTH) {
-            b.push(FILL);
+            right.push('█');
         }
         for _ in filled.min(BAR_WIDTH)..BAR_WIDTH {
-            b.push(EMPTY);
+            right.push('░');
         }
-        b
-    };
-    let pad = l
-        .content_w
-        .saturating_sub(help.num_chars() + right.num_chars() + bar.num_chars());
-
-    let mut seg = CString16::new();
-    seg.push(VLINE);
-    seg.push(SPACE);
-    seg.push_str(help);
-    for _ in 0..pad {
-        seg.push(SPACE);
     }
-    write_at(out, l, l.frame_left, l.status_row, seg.as_ref());
-
-    let right_col = l.frame_left + 1 + help.num_chars() + pad;
-    let _ = out.set_color(Color::Yellow, Color::Black);
-    write_at(out, l, right_col, l.status_row, right.as_ref());
-    write_at(out, l, right_col + right.num_chars(), l.status_row, bar.as_ref());
-    let _ = out.set_color(Color::LightGray, Color::Black);
-    write_glyph(out, l, l.frame_left + l.frame_w - 1, l.status_row, VLINE);
+    right
 }
 
-/// The Secure Boot warning row: yellow on black, between the status line and
-/// the bottom border. Text is truncated with `...` when it would overflow.
+/// The Secure Boot warning row, between the status line and the bottom border.
 fn draw_warning(out: &mut Output, l: &Layout, row: usize, warn: &str) {
-    let _ = out.set_color(Color::Yellow, Color::Black);
+    let _ = out.set_color(Color::White, Color::Black);
     let mut buf = CString16::new();
     buf.push(VLINE);
     buf.push(SPACE);
-    let max = l.content_w.saturating_sub(3);
+    let max = l.content_w.saturating_sub(2);
     let chars: Vec<char> = warn.chars().collect();
-    let (body, suffix) = if chars.len() > max {
-        (&chars[..max.saturating_sub(3)], &['.', '.', '.'][..])
-    } else {
-        (chars.as_slice(), &[][..])
-    };
     let mut used = 0;
-    for &c in body.iter().chain(suffix.iter()) {
+    for &c in chars.iter().take(max) {
         buf.push(Char16::try_from(c).unwrap_or(SPACE));
         used += 1;
     }
@@ -525,7 +874,7 @@ fn draw_warning(out: &mut Output, l: &Layout, row: usize, warn: &str) {
     }
     buf.push(VLINE);
     write_at(out, l, l.frame_left, row, buf.as_ref());
-    let _ = out.set_color(Color::LightGray, Color::Black);
+    let _ = out.set_color(Color::White, Color::Black);
 }
 
 /// Draws a horizontal border line between the two end caps.
@@ -556,14 +905,152 @@ fn write_at(out: &mut Output, l: &Layout, col: usize, row: usize, text: &CStr16)
     let _ = out.output_string_lossy(text);
 }
 
+/// Scroll-up/down markers at the right edge of the row area.
+fn draw_scroll_markers(out: &mut Output, l: &Layout, scroll_top: usize, len: usize) {
+    if scroll_top > 0 {
+        write_glyph(out, l, l.frame_left + l.content_w, l.header_row, SCROLL_UP);
+    }
+    if scroll_top + l.entry_rows < len {
+        write_glyph(
+            out,
+            l,
+            l.frame_left + l.content_w,
+            l.status_row - 1,
+            SCROLL_DOWN,
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Value editors (the `lbm` dialogs, on the text console)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Parameters of one value editor, mirroring `lbm`'s `EditView` dialogs.
+struct EditSpec<'a> {
+    title: &'a CStr16,
+    initial: &'a str,
+    validate: fn(&str) -> bool,
+    hint: &'a str,
+}
+
+/// Modal text editor: type a value, Enter confirms, Esc cancels. Returns the
+/// confirmed value when valid, or `None` on cancel. While invalid, the error
+/// row is shown and Enter is ignored.
+fn edit_text(
+    input: &mut Input,
+    out: &mut Output,
+    l: &Layout,
+    serial: &mut Option<Console>,
+    spec: &EditSpec<'_>,
+) -> Option<String> {
+    let mut buf: Vec<char> = spec.initial.chars().collect();
+    let max_chars = l.content_w.saturating_sub(4);
+    let mut error: Option<&str> = None;
+    loop {
+        draw_edit(out, l, spec.title, &buf, spec.hint, error);
+        let mut keys = Vec::new();
+        while let Ok(Some(key)) = input.read_key() {
+            if let Some(mk) = key_from_conin(key) {
+                keys.push(mk);
+            }
+        }
+        if let Some(console) = serial.as_mut() {
+            keys.extend(console.poll());
+        }
+        let mut done = None;
+        for key in keys {
+            match key {
+                MenuKey::Esc => {
+                    done = Some(None);
+                    break;
+                }
+                MenuKey::Enter => {
+                    let s: String = buf.iter().collect();
+                    if (spec.validate)(&s) {
+                        done = Some(Some(s));
+                        break;
+                    }
+                    error = Some("Invalid value — Esc to cancel");
+                }
+                MenuKey::Backspace => {
+                    buf.pop();
+                    error = None;
+                }
+                MenuKey::Printable(c) if buf.len() < max_chars => {
+                    buf.push(c);
+                    error = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(d) = done {
+            return d;
+        }
+        boot::stall(Duration::from_millis(50));
+    }
+}
+
+/// Draws the editor frame: title, the value with a cursor block, a hint row,
+/// an optional error row, and the key help status line.
+fn draw_edit(
+    out: &mut Output,
+    l: &Layout,
+    title: &CStr16,
+    buf: &[char],
+    hint: &str,
+    error: Option<&str>,
+) {
+    draw_frame(out, l, title, None);
+    let mut line = String::new();
+    for &c in buf {
+        line.push(c);
+    }
+    line.push('_');
+    draw_row(out, l, l.first_entry_row, &line, true);
+    draw_row(out, l, l.first_entry_row + 1, hint, false);
+    if let Some(err) = error {
+        draw_row(out, l, l.first_entry_row + 2, err, false);
+    }
+    draw_status(out, l, "Type value  Enter: OK  Esc: cancel  Backspace: delete", None);
+}
+
+/// The numeric `timeout` validator.
+fn is_u32(s: &str) -> bool {
+    s.parse::<u32>().is_ok()
+}
+
+/// A trimmed string, or `None` when empty (unsetting the key).
+fn opt_str(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// `1`-`9`/`0` jump to an entry by position, like `lbm`'s list picker.
+fn digit_value(c: char) -> Option<usize> {
+    match c {
+        '1'..='9' => Some((c as u8 - b'1') as usize),
+        '0' => Some(9),
+        _ => None,
+    }
+}
+
 /// Seconds until the deadline, rounded up (the menu shows `timeout`, then 0).
 fn remaining_seconds(elapsed_ms: u32, deadline_ms: u32) -> u32 {
     deadline_ms.saturating_sub(elapsed_ms).div_ceil(1000)
 }
 
-/// Maps a UEFI keyboard-console key to the menu's logical keys. Digits jump
-/// to an entry by position (`1`-`9`/`0`), Enter/CR/LF boots, Esc disarms the
-/// countdown. Everything else is ignored.
+/// Lossy UTF-16 to UTF-8 for drawing, logging and JSON output only.
+fn to_cstring(s: &str) -> CString16 {
+    CString16::try_from(s).unwrap_or_else(|_| CString16::new())
+}
+
+/// Maps a UEFI keyboard-console key to the menu's logical keys. Enter/CR/LF
+/// and Backspace become their logical keys, printable characters pass through
+/// for the editors, and everything else is ignored.
 fn key_from_conin(key: Key) -> Option<MenuKey> {
     match key {
         Key::Special(ScanCode::UP) => Some(MenuKey::Up),
@@ -573,13 +1060,13 @@ fn key_from_conin(key: Key) -> Option<MenuKey> {
         Key::Special(ScanCode::PAGE_UP) => Some(MenuKey::PageUp),
         Key::Special(ScanCode::PAGE_DOWN) => Some(MenuKey::PageDown),
         Key::Special(ScanCode::ESCAPE) => Some(MenuKey::Esc),
+        Key::Special(ScanCode::DELETE) => Some(MenuKey::Backspace),
         Key::Printable(c) => {
             let code: u16 = c.into();
             match code {
                 0x0D | 0x0A => Some(MenuKey::Enter),
-                0x31..=0x39 => Some(MenuKey::Jump((code - 0x31) as usize)),
-                0x30 => Some(MenuKey::Jump(9)),
-                _ => None,
+                0x08 => Some(MenuKey::Backspace),
+                code => char::from_u32(code as u32).map(MenuKey::Printable),
             }
         }
         _ => None,

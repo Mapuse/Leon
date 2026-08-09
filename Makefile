@@ -1,10 +1,10 @@
 include env.mk
 
-.PHONY: all build bootloader kernel lbt lbc stage install install-man uninstall clean tui-test clippy qemu esp sign
+.PHONY: all build bootloader kernel lbt lbc lbm stage install install-man uninstall clean tui-test clippy qemu esp sign
 
 all: build
 
-build: bootloader kernel lbt lbc
+build: bootloader kernel lbt lbc lbm
 
 bootloader:
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo build --locked --target $(UEFI_TARGET) --profile $(PROFILE)
@@ -14,9 +14,9 @@ kernel:
 
 # Host-side companion tools. `lbt` is the build tool (discovery, geometry,
 # image builders, cps); `lbc` is the boot configuration + boot control binary
-# (boot-manager TUI, boot config, staging). Both are pure Rust and are
-# explicitly not default members so the UEFI-only `cargo build`/`clippy` above
-# never try to compile them.
+# (boot config, staging); `lbm` is the menuconfig-style boot-config editor TUI.
+# All are pure Rust and are explicitly not default members so the UEFI-only
+# `cargo build`/`clippy` above never try to compile them.
 lbt:
 	CARGO_TARGET_DIR=$(CURDIR)/target \
 	cargo build --locked --target $(RUST_TARGET) -p lbt --profile $(PROFILE)
@@ -24,6 +24,10 @@ lbt:
 lbc:
 	CARGO_TARGET_DIR=$(CURDIR)/target \
 	cargo build --locked --target $(RUST_TARGET) -p lbc --profile $(PROFILE)
+
+lbm:
+	CARGO_TARGET_DIR=$(CURDIR)/target \
+	cargo build --locked -p lbm --profile $(PROFILE)
 
 # Stage a ready-to-boot ESP tree under build/esp or the mounted ESP root
 # specified by DESTDIR. This mirrors the new `lbc stage` command and keeps the
@@ -45,12 +49,12 @@ install: install-man
 
 install-man:
 	install -d $(DESTDIR)$(PREFIX)/share/man/man1 $(DESTDIR)$(PREFIX)/share/man/man7
-	install -m 644 docs/lbt.1 docs/lbl.1 docs/lbc.1 $(DESTDIR)$(PREFIX)/share/man/man1/
+	install -m 644 docs/lbt.1 docs/lbl.1 docs/lbc.1 docs/lbm.1 $(DESTDIR)$(PREFIX)/share/man/man1/
 	install -m 644 docs/leon-common.7 $(DESTDIR)$(PREFIX)/share/man/man7/
 
 uninstall:
 	rm -f $(DESTDIR)/EFI/BOOT/$(BOOT_FILE) $(DESTDIR)/EFI/leon/kernel.efi
-	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/lbt.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbl.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbc.1 $(DESTDIR)$(PREFIX)/share/man/man7/leon-common.7
+	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/lbt.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbl.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbc.1 $(DESTDIR)$(PREFIX)/share/man/man1/lbm.1 $(DESTDIR)$(PREFIX)/share/man/man7/leon-common.7
 
 # Generic host test run: the host-testable workspace crates (`common`, `lbt`,
 # `lbc`) with default features. The `leon` UEFI binary is excluded — a
@@ -60,18 +64,26 @@ test:
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked --workspace --exclude leon
 
 # Run the TUI regression suite locally, including the live full-terminal test.
-# This verifies the `lbc tui` experience and the new TUI keymap handling.
+# This verifies the `lbm` menuconfig keymap and layout handling.
 tui-test:
-	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked -p lbc --test tui_full -- --nocapture
+	CARGO_TARGET_DIR=$(CURDIR)/target cargo test -p lbm -- --nocapture
 
 clippy:
 	cargo clippy --all-targets --target $(UEFI_TARGET) -- -D warnings
 	$(MAKE) -C kernel TARGET=$(UEFI_TARGET) clippy
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo clippy -p lbt -- -D warnings
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo clippy -p lbc -- -D warnings
+	CARGO_TARGET_DIR=$(CURDIR)/target cargo clippy -p lbm -- -D warnings
 
 qemu: stage
 	ARCH=$(ARCH) ./scripts/run_qemu.sh
+
+# Boot QEMU holding the menuconfig TUI on screen so it can be previewed and
+# driven by hand (arrow keys, Enter, Esc). Esc disarms the countdown; Ctrl-A
+# then 'c' switches to the QEMU monitor (Ctrl-A 'x' quits). Override the hold
+# with e.g. `make qemu-preview MENU_TIMEOUT=60`.
+qemu-preview: stage
+	ARCH=$(ARCH) MENU_TIMEOUT=300 ./scripts/run_qemu.sh
 
 esp: stage
 	ARCH=$(ARCH) ./scripts/make_esp.sh

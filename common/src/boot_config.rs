@@ -10,7 +10,7 @@
 
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 /// Boot configuration as parsed from the boot volume.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -108,6 +108,65 @@ fn parse_bool(v: &str) -> Result<bool, BootConfigError> {
     }
 }
 
+/// Serializes a [`BootConfig`] back to TOML, omitting unset keys — the exact
+/// inverse of [`parse_boot_config`], and in the same shape the host tools
+/// (`lbc`/`lbm`) write. Used by the bootloader when the on-device menuconfig
+/// edits the config and saves it to `\EFI\leon\boot.toml`.
+pub fn serialize_boot_config(cfg: &BootConfig) -> String {
+    let mut out = String::new();
+    if let Some(t) = cfg.timeout {
+        out.push_str("timeout = ");
+        out.push_str(&t.to_string());
+        out.push('\n');
+    }
+    if let Some(s) = cfg.splash {
+        out.push_str("splash = ");
+        out.push_str(if s { "true" } else { "false" });
+        out.push('\n');
+    }
+    if let Some(v) = &cfg.theme {
+        out.push_str("theme = ");
+        push_string(&mut out, v);
+        out.push('\n');
+    }
+    if let Some(v) = &cfg.default_entry {
+        out.push_str("default_entry = ");
+        push_string(&mut out, v);
+        out.push('\n');
+    }
+    if let Some(v) = &cfg.entries_file {
+        out.push_str("entries_file = ");
+        push_string(&mut out, v);
+        out.push('\n');
+    }
+    out
+}
+
+/// Appends a TOML string value. Values without a single quote use a TOML
+/// literal string (`'...'`, no escapes) — what the host tools emit for
+/// backslash-heavy paths like `\EFI\leon\entries.jsonc`. Values containing a
+/// quote fall back to a double-quoted basic string with the escapes the
+/// parser above knows. Both forms are re-parseable by [`parse_boot_config`].
+fn push_string(out: &mut String, v: &str) {
+    if !v.contains('\'') {
+        out.push('\'');
+        out.push_str(v);
+        out.push('\'');
+    } else {
+        out.push('"');
+        for c in v.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +226,46 @@ mod tests {
             cfg.entries_file.as_deref(),
             Some(r"\EFI\leon\entries.jsonc")
         );
+    }
+
+    #[test]
+    fn serialization_roundtrips_through_parse() {
+        let cfg = BootConfig {
+            timeout: Some(5),
+            default_entry: Some("Cudane Linux".to_string()),
+            theme: Some("splash.py".to_string()),
+            splash: Some(true),
+            entries_file: Some(r"\EFI\leon\entries.jsonc".to_string()),
+        };
+        let s = serialize_boot_config(&cfg);
+        assert_eq!(parse_boot_config(&s).unwrap(), cfg);
+    }
+
+    #[test]
+    fn serialization_omits_unset_keys() {
+        // Same contract as `lbc config set` / `lbm`: unset keys are omitted.
+        assert!(serialize_boot_config(&BootConfig::default()).trim().is_empty());
+    }
+
+    #[test]
+    fn serialization_uses_literal_strings_for_backslash_paths() {
+        let cfg = BootConfig {
+            entries_file: Some(r"\EFI\leon\entries.jsonc".to_string()),
+            ..BootConfig::default()
+        };
+        let s = serialize_boot_config(&cfg);
+        assert!(s.contains(r"entries_file = '\EFI\leon\entries.jsonc'"));
+        assert_eq!(parse_boot_config(&s).unwrap(), cfg);
+    }
+
+    #[test]
+    fn serialization_escapes_embedded_quotes() {
+        let cfg = BootConfig {
+            default_entry: Some("It's Leon".to_string()),
+            theme: Some(r"a\b".to_string()),
+            ..BootConfig::default()
+        };
+        let s = serialize_boot_config(&cfg);
+        assert_eq!(parse_boot_config(&s).unwrap(), cfg);
     }
 }

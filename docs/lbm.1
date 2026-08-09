@@ -1,0 +1,103 @@
+.\" Leon Boot Menuconfig — Man Page
+.TH LBM 1 "2026-08-09" "lbm 0.7.0" "User Commands"
+.SH NAME
+lbm \- Leon Boot Menuconfig: edit Leon's boot.toml in a menuconfig-style TUI
+.SH SYNOPSIS
+.B lbm
+.RI [ config_path ]
+.RI [ entries_file ]
+.SH DESCRIPTION
+.B lbm
+is the interactive, menuconfig-style editor for Leon's boot configuration
+.br
+.RI ( boot.toml ).
+It is a pure-Rust TUI built with
+.B cursive
+(crossterm backend; no ncurses dependency) and is themed strictly black and
+white with the classic menuconfig look: a highlighted selection row, bracketed
+items, and
+.RI ( value )
+annotations.
+.PP
+The editor understands exactly the keys the bootloader reads: \fItimeout\fR
+(integer seconds), \fIsplash\fR (whether the boot menu is shown),
+\fIdefault_entry\fR (the label booted automatically), \fItheme\fR, and
+\fIentries_file\fR. Unset keys are omitted on save, byte-for-byte matching what
+\fBlbc config set\fR writes and what
+.BR lbl (1)
+validates on every boot. The on-disk file stays single-quoted-literal-friendly,
+so backslash-heavy values like
+.I \eEFI\eleon\eentries.jsonc
+round-trip unchanged.
+.SH ARGUMENTS
+.TP
+.I config_path
+The
+.I boot.toml
+to edit. Defaults to
+.IR ~/.config/leon/boot.toml .
+.TP
+.I entries_file
+The bootloader's auto-generated entries file
+.RI ( entries.jsonc ,
+defaulting to
+.IR \eEFI\eleon\eentries.jsonc )
+to feed the "Default Boot Entry" picker and the "Discovered Boot Entries"
+view. When omitted, lbm probes the usual ESP mount points
+.RI ( /boot/efi ,
+.IR /boot ,
+.IR /efi ).
+.SH COMMANDS
+.TP
+.B Save
+Write the current configuration to the selected
+.I boot.toml
+(also available with Ctrl+S).
+.TP
+.B "Save & Exit"
+Save and leave the editor.
+.TP
+.B Exit
+Leave without saving (asks first when there are unsaved changes; Ctrl+Q quits).
+.SH KEYMAP
+.TP
+.B Up / Down
+Move the selection.
+.TP
+.B Enter
+Select the highlighted item / toggle
+.IR splash .
+.TP
+.B Esc
+Back out of the current dialog or cancel an edit.
+.TP
+.B Ctrl+S
+Save the configuration.
+.TP
+.B Ctrl+Q
+Quit.
+.SH FILES
+.TP
+.I ~/.config/leon/boot.toml
+The host copy of the boot configuration edited by
+.BR lbm .
+.TP
+.I \eEFI\eleon\eboot.toml
+The copy the bootloader actually reads; stage it with
+.B "lbc stage"
+or
+.B "lbc config set"
+to mirror changes onto an ESP.
+.TP
+.I \eEFI\eleon\eentries.jsonc
+The auto-generated boot-entries file written by the bootloader on every boot,
+used by lbm's entry picker.
+.SH SEE ALSO
+.BR lbl (1),
+.BR lbt (1),
+.BR lbc (1),
+.BR leon-common (7)
+.SH AUTHOR
+Mapuse
+.SH LICENSE
+MIT

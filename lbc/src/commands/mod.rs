@@ -13,9 +13,6 @@ pub mod alias;
 pub mod boot;
 pub mod config;
 pub mod misc;
-pub mod tui;
-
-mod tui_app;
 
 pub use lbt::commands::util;
 
@@ -59,7 +56,6 @@ pub fn dispatch(node: &Node, parsed: Parsed) -> Result<()> {
         Handler::ProfileList => config::profile_list(),
         Handler::ProfileLoad => config::profile_load(parsed.value("profile").unwrap_or_default()),
         Handler::ProfileDelete => config::profile_delete(parsed.value("profile").unwrap_or_default()),
-        Handler::Tui => tui::run(),
         Handler::KeymapShow => misc::keymap_show(),
         Handler::Version => misc::version(),
         Handler::HelpAll => misc::help_all(),

@@ -2,7 +2,7 @@
 //!
 //! This module is a scaffold for the Rust-side TUI: a GOP framebuffer-backed
 //! renderer and minimal widget primitives. It is intentionally small and will
-//! be expanded to match the host ratatui menu layout.
+//! be expanded to match the host menuconfig layout.
 
 pub mod gop;
 pub use gop::GopRenderer;

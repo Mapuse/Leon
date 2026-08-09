@@ -42,8 +42,10 @@ pub enum MenuKey {
     Enter,
     /// Disarm the auto-boot countdown.
     Esc,
-    /// Jump to an entry by position (`1`-`9`/`0` map to 0-9).
-    Jump(usize),
+    /// Delete the last character (UEFI Backspace, or BS/DEL on a terminal).
+    Backspace,
+    /// A text character, for the config value editors.
+    Printable(char),
 }
 
 /// The UART console, when present. Reads are configured with a short timeout
@@ -165,10 +167,14 @@ impl KeyDecoder {
                     }
                 }
                 b'\r' | b'\n' => self.key(&mut keys, MenuKey::Enter, 1),
-                b'1'..=b'9' => self.key(&mut keys, MenuKey::Jump((b0 - b'1') as usize), 1),
-                b'0' => self.key(&mut keys, MenuKey::Jump(9), 1),
-                b'j' | b'J' => self.key(&mut keys, MenuKey::Down, 1),
-                b'k' | b'K' => self.key(&mut keys, MenuKey::Up, 1),
+                b'\x08' | b'\x7f' => self.key(&mut keys, MenuKey::Backspace, 1),
+                // Vim-style navigation keys keep working on serial even when
+                // the terminal has no arrow keys.
+                b'j' | b'J' => self.key(&mut keys, MenuKey::Up, 1),
+                b'k' | b'K' => self.key(&mut keys, MenuKey::Down, 1),
+                // Anything else printable is passed through for the value
+                // editors (digits, letters, punctuation).
+                b' '..=b'~' => self.key(&mut keys, MenuKey::Printable(b0 as char), 1),
                 _ => self.skip(1), // unprintable or unbound
             }
         }
