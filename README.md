@@ -13,7 +13,7 @@
 
 `▐▀` `-` `▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▌`
 
-The Bootloader of **`[Cudane]`**, a Flicker-Free Replace Written in **`[Rust]`**, It acquires the **`[BGRT]`** motherboard logo and the **`[GOP]`** frame buffer without ever calling `set_mode`, then chainloads any `\EFI\*.efi` boot entry — its own kernel included — with the screen untouched.
+a Flicker-Free Bootloader Written in **`[Rust]`**, It acquires the **`[BGRT]`** motherboard logo and the **`[GOP]`** frame buffer without ever calling `set_mode`, then chainloads any `\EFI\*.efi` boot entry — its own kernel included — with the screen untouched.
 
 - **`[Version]`**: **`[0.7.0]`**
 
