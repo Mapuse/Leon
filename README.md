@@ -486,7 +486,7 @@ Ninja has no `-D` override; edit `DESTDIR`/`PREFIX` at the top of `build.ninja` 
 ### Meson
 
 ```sh
-./gen-cross.sh                              # generate cross.txt for host arch
+./scripts/crossgen.sh                              # generate cross.txt for host arch
 meson setup builddir --cross-file cross.txt
 meson compile -C builddir                   # lbl.efi + lbl-kernel.efi + lbt
 meson install -C builddir
@@ -507,7 +507,7 @@ cargo build --target aarch64-unknown-uefi --release
 cmake -B build -DCMAKE_TOOLCHAIN_FILE=toolchain.cmake -DCMAKE_SYSTEM_NAME=Generic
 ```
 
-The CMake file performs the same arch detection and exposes `LEON_UEFI_TARGET` for any future C component. `pkgconfig.sh` is a passthrough exposing the unified `/system` convention (`PKG_CONFIG_SYSROOT_DIR=/`, `PKG_CONFIG_LIBDIR=/system/lib/pkgconfig`) — Leon itself has no C dependencies.
+The CMake file performs the same arch detection and exposes `LEON_UEFI_TARGET` for any future C component. `scripts/pkgconfig.sh` is a passthrough exposing the unified `/system` convention (`PKG_CONFIG_SYSROOT_DIR=/`, `PKG_CONFIG_LIBDIR=/system/lib/pkgconfig`) — Leon itself has no C dependencies.
 
 ---
 
@@ -651,9 +651,9 @@ Leon/
 ├── Makefile / env.mk       # Make front-end (auto arch; UEFI + musl)
 ├── build.ninja             # Ninja front-end
 ├── meson.build             # Meson front-end (lbl.efi + lbl-kernel.efi + lbt)
-├── gen-cross.sh / cross.txt# Meson cross-file generator
+├── scripts/crossgen.sh / cross.txt# Meson cross-file generator
 ├── toolchain.cmake         # CMake arch detection
-├── pkgconfig.sh            # /system pkg-config passthrough (no C deps)
+├── scripts/pkgconfig.sh            # /system pkg-config passthrough (no C deps)
 ├── .cargo/config.toml      # Per-target rustflags (rust-lld)
 └── scripts/
     ├── run_qemu.sh         # QEMU/OVMF or QEMU/AAVMF boot

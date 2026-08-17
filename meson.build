@@ -7,8 +7,8 @@ project('lbl', 'rust',
   ],
 )
 
-# ── Auto-detect architecture via gen-cross.sh ──────────────────────────
-gen_cross = find_program('gen-cross.sh')
+# ── Auto-detect architecture via scripts/crossgen.sh ──────────────────────────
+gen_cross = find_program('scripts/crossgen.sh')
 run_command(gen_cross, check : true)
 
 build_dir = meson.project_build_root() / 'cargo'

@@ -1,6 +1,6 @@
 #!/bin/sh
-# gen-cross.sh — Generate Meson cross-file for Leon with auto-detection
-# Usage: ./gen-cross.sh [output_path]
+# scripts/crossgen.sh — Generate Meson cross-file for Leon with auto-detection
+# Usage: ./scripts/crossgen.sh [output_path]
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
